@@ -116,12 +116,26 @@ class ComponentLoader:
             component_root_path = os.path.abspath(os.path.join(root_path, os.pardir))
             self.logger.debug("Adding [%s] to Python load path.", component_root_path)
             # needs to be at the beginning of the system path, otherwise import machinery tries to load application-internal modules
-            sys.path.insert(0, component_root_path)
+
+            # It ensures that every root path is listed exactly once.
+            new_path = [component_root_path]
+            visited = {os.path.realpath(component_root_path)}
+            for p in sys.path:
+                key = os.path.realpath(p)
+                if key not in visited:
+                    visited.add(key)
+                    new_path.append(p)
+            sys.path.clear()
+            sys.path.extend(new_path)
+
+            if component_name == "security":
+                self.logger.debug("Loading security module")
+
             try:
                 root_module = self._load_component(component_name, module_dirs, root_path)
+            except Exception:
+                self.logger.exception("Could not load component [%s]", component_name)
+            else:
                 root_modules.append(root_module)
-            except BaseException:
-                msg = f"Could not load component [{component_name}]"
-                self.logger.exception(msg)
-                raise exceptions.SystemSetupError(msg)
+
         return root_modules
