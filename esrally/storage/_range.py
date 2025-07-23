@@ -50,7 +50,7 @@ class RangeSet(Sequence["Range"], Set["Range"], Hashable):
         raise NotImplementedError
 
     @abstractmethod
-    def split(self, max_size: int = MAX_LENGTH) -> tuple[Range | EmptyRange, RangeSet]:
+    def split(self, max_size: int | None = None) -> tuple[Range | EmptyRange, RangeSet]:
         """It returns a Range of max size on the left and the rest of the range set on the right.
         :param max_size: if given, returned range is cut after `max_size` bytes, and is excluded part is appended to
         the rangeset remaining part.
@@ -142,7 +142,7 @@ class EmptyRange(RangeSet):
     def _remove(self, others: Iterable[Range]) -> Iterable[Range]:
         return NO_RANGE
 
-    def split(self, max_size: int = MAX_LENGTH) -> tuple[Range | EmptyRange, RangeSet]:
+    def split(self, max_size: int | None = None) -> tuple[Range | EmptyRange, RangeSet]:
         return NO_RANGE, NO_RANGE
 
     @property
@@ -219,11 +219,11 @@ class Range(RangeSet):
             return str(self._start)
         return f"{self._start}-{_pretty_end(self._end)}"
 
-    def split(self, max_size: int = MAX_LENGTH) -> tuple[Range | EmptyRange, RangeSet]:
-        if max_size == MAX_LENGTH:
+    def split(self, max_size: int | None = None) -> tuple[Range | EmptyRange, RangeSet]:
+        if max_size is None or max_size == MAX_LENGTH:
             return self, NO_RANGE
         if max_size <= 0:
-            return NO_RANGE, self
+            raise ValueError("max_size must be greater than 0")
         max_end = self.start + max_size
         if max_end >= self.end:
             return self, NO_RANGE
@@ -286,12 +286,12 @@ class RangeTree(RangeSet):
         # pylint: disable=protected-access
         return chain(self._left._remove(others), self._right._remove(others))
 
-    def split(self, max_size: int = MAX_LENGTH) -> tuple[Range | EmptyRange, RangeSet]:
+    def split(self, max_size: int | None = None) -> tuple[Range | EmptyRange, RangeSet]:
         left: Range | EmptyRange
 
         # It separates the top left range from the others.
         left, *others = self
-        if max_size == MAX_LENGTH:
+        if max_size in [None, MAX_LENGTH]:
             # It re-constructs the right side of the tree
             return left, _rangeset(others)
 

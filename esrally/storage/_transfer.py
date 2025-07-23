@@ -24,7 +24,7 @@ import threading
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple
 
 from esrally.storage._adapter import Head, ServiceUnavailableError
 from esrally.storage._client import MAX_CONNECTIONS, Client
@@ -52,6 +52,11 @@ class TransferStatus(enum.Enum):
 
 
 MULTIPART_SIZE = 8 * 1024 * 1024
+
+
+class TransferPart(NamedTuple):
+    number: int
+    range: Range
 
 
 class Transfer:
@@ -102,10 +107,7 @@ class Transfer:
         if max_connections <= 0:
             raise ValueError("max_connections must be greater than 0")
         if multipart_size is None:
-            if max_connections == 1:
-                # It disables multipart transfers.
-                multipart_size = MAX_LENGTH
-            else:
+            if max_connections >= 1:
                 # By default, it will enable multipart with a hardcoded size.
                 multipart_size = MULTIPART_SIZE
         if not todo:
@@ -114,27 +116,34 @@ class Transfer:
         if document_length is not None:
             # It limits the parts of the file to transfer to the document length.
             todo &= Range(0, document_length)
+        todo -= done
+        if multipart_size is not None:
+            if done and done.start % multipart_size:
+                raise ValueError("done range is misaligned")
+            if todo and todo.start % multipart_size:
+                raise ValueError("done range is misaligned")
 
         self.client = client
         self.url = url
         self.path = path
+        self._lock = threading.Lock()
         self._document_length = document_length
         self._max_connections = max_connections
         self._started = threads.TimedEvent()
         self._workers = threads.WaitGroup(max_count=max_connections)
         self._finished = threads.TimedEvent()
-        self._multipart_size = multipart_size
-        self._todo = todo - done
         self._done = done
+        self._todo = todo - done
+        self._multipart_size = multipart_size
         self._fds: list[FileDescriptor] = []
         self._executor = executor
         self._errors: list[Exception] = []
-        self._lock = threading.Lock()
         self._resumed_size = 0
         self._crc32c = crc32c
         if resume and os.path.isfile(self.path + ".status"):
             try:
-                self._resume_status()
+                with self._lock:
+                    self._resume_status()
             except Exception as ex:
                 LOG.error("Failed to resume transfer: %s", ex)
             else:
@@ -157,8 +166,7 @@ class Transfer:
         with self._lock:
             self._document_length = value
             # It ensures to finish requesting file parts as soon it reaches the expected document length.
-            self._todo = self._todo & Range(0, value)
-            self._done = self._done & Range(0, value)
+            self._set_done(self._done)
 
     @property
     def max_connections(self) -> int:
@@ -239,9 +247,9 @@ class Transfer:
             file_size = os.path.getsize(self.path)
             if done.end > file_size:
                 raise ValueError(f"corrupted file size is smaller than completed part: {done.end} > {file_size} (path='{self.path}')")
+            self._set_done(self._done)
+            self._set_todo(self._todo - self._done)
 
-            self._done = self.done | done
-            self._todo = self._todo - done
         # Update the resumed size so that it will compute download speed only on the new parts.
         self._resumed_size = done.size
         if not self._todo:
@@ -348,12 +356,33 @@ class Transfer:
             except Exception as ex:
                 LOG.warning("error closing file descriptor %r: %s", fd.path, ex)
 
+    def _pop_todo(self) -> RangeSet:
+        part, todo = self._todo.split(self._multipart_size)
+        self._set_todo(todo)
+        return part
+
+    def _set_todo(self, value: RangeSet) -> None:
+        if value and self._multipart_size is not None and value.start % self._multipart_size:
+            raise ValueError("todo range can't be misaligned")
+        # After receiving data _document_length could have been changed reducing the range to download.
+        self._todo = value & Range(0, self._document_length or MAX_LENGTH)
+
+    def _push_todo(self, value: RangeSet) -> None:
+        self._set_todo(self._todo | value)
+
+    def _set_done(self, value: RangeSet) -> None:
+        if value and self._multipart_size is not None and value.start % self._multipart_size:
+            raise ValueError("done range can't be misaligned")
+        # After receiving data _document_length could have been changed reducing the range to download.
+        self._done = value & Range(0, self._document_length or MAX_LENGTH)
+
+    def _push_done(self, value: RangeSet) -> None:
+        self._set_done(self._done | value)
+
     @contextmanager
     def _open(self) -> Iterator[FileDescriptor | None]:
-        todo: RangeSet
         with self._lock:
-            # It gets a part of the file to transfer from the remaining range.
-            todo, self._todo = self._todo.split(self._multipart_size)
+            todo = self._pop_todo()
         if not todo:
             # There is nothing more to do.
             yield None
@@ -364,29 +393,32 @@ class Transfer:
         try:
             with self._lock:
                 # It opens a file descriptor bound to the part of the file assigned to this task.
-                fd = FileWriter(self.path, todo)
+                fd = FileWriter(self.path, todo, self._multipart_size)
                 # It registers the file descriptor so that it can be closed from another thread.
                 self._fds.append(fd)
             with fd:
                 try:
                     yield fd
+                    fd.flush()
                 finally:
                     with self._lock:
                         try:
                             # It de-registers the file descriptor so that it can't be closed from another thread.
-                            fd.flush()
                             self._fds.remove(fd)
                         except ValueError:
                             pass
                         # After receiving data _document_length could have been changed reducing the range to download.
                         todo &= Range(0, self._document_length or MAX_LENGTH)
-                        # It updates the status of the works with the completed part.
-                        done, todo = todo.split(fd.position)
-                        self._todo |= todo
-                        self._done |= done
+                        done = Range(todo.start, fd.position)
+                        if todo != done:
+                            # It pushes backs the work to re-do again.
+                            self._push_todo(todo)
+                        else:
+                            # It updates the status of the works with the completed part.
+                            self._push_done(done)
         finally:
-            if todo:
-                LOG.info("transfer interrupted: %s (done: %s, todo: %s).", self.url, done, todo)
+            if todo != done:
+                LOG.info("transfer interrupted: %s (done: %d, todo: %s).", self.url, done, todo)
             else:
                 LOG.debug("transfer done: %s (done: %s).", self.url, done)
 
@@ -542,15 +574,26 @@ class FileDescriptor:
 class FileWriter(FileDescriptor):
     """OutputStream provides an output stream wrapper able to prevent exceeding writing given range."""
 
-    def __init__(self, path: str, ranges: RangeSet = NO_RANGE):
+    def __init__(self, path: str, ranges: RangeSet = NO_RANGE, multipart_size: int | None = None):
         if os.path.isfile(path):
             fd = open(path, "r+b")
         else:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             fd = open(path, "w+b")  # pylint: disable=consider-using-with
         if ranges and ranges.start > 0:
+            if len(ranges) > 1:
+                raise NotImplementedError(f"multiple ranges is not supported: {ranges}")
+            if multipart_size is not None and ranges.start % multipart_size:
+                raise ValueError(f"misaligned ranges.start: {ranges.start}")
             fd.seek(ranges.start)
+        self.multipart_size = multipart_size
         super().__init__(path, fd, ranges)
+
+    @property
+    def part_number(self) -> int | None:
+        if self.multipart_size is None:
+            return None
+        return self.ranges.start // self.multipart_size
 
     def write(self, data):
         with self._lock:
