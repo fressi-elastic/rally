@@ -16,6 +16,9 @@
 # under the License.
 from __future__ import annotations
 
+import csv
+import datetime
+import json
 import logging
 import threading
 import time
@@ -23,7 +26,7 @@ import urllib.parse
 from collections import defaultdict, deque
 from collections.abc import Iterator
 from random import Random
-from typing import NamedTuple
+from typing import NamedTuple, TextIO
 
 from typing_extensions import Self
 
@@ -40,7 +43,6 @@ from esrally.utils.threads import WaitGroup, WaitGroupLimitError
 
 LOG = logging.getLogger(__name__)
 
-MIRRORS_FILES = "~/.rally/storage-mirrors.json"
 MAX_CONNECTIONS = 8
 RANDOM = Random(time.monotonic_ns())
 
@@ -63,7 +65,8 @@ class Client:
             else:
                 random = Random(random_seed)
         max_connections = int(cfg.opts(section="storage", key="storage.max_connections", default_value=MAX_CONNECTIONS, mandatory=False))
-        return cls(adapters=adapters, mirrors=mirrors, random=random, max_connections=max_connections)
+        failures_file: str | None = cfg.opts(section="storage", key="storage.failures_file", default_value=None, mandatory=False)
+        return cls(adapters=adapters, mirrors=mirrors, random=random, max_connections=max_connections, failures_file=failures_file)
 
     def __init__(
         self,
@@ -71,6 +74,7 @@ class Client:
         mirrors: MirrorList,
         random: Random,
         max_connections: int = MAX_CONNECTIONS,
+        failures_file: str | None = None,
     ):
         self._adapters: AdapterRegistry = adapters
         self._cached_heads: dict[str, tuple[Head | Exception, float]] = {}
@@ -79,6 +83,14 @@ class Client:
         self._mirrors: MirrorList = mirrors
         self._random: Random = random
         self._stats: dict[str, deque[ServerStats]] = defaultdict(lambda: deque(maxlen=100))
+        self._failures_file: TextIO | None = None
+        self._failures_writer: csv.DictWriter | None = None
+        if failures_file is not None:
+            with open(failures_file, "w") as fd:
+                self._failures_file = fd
+                self._failures_writer = writer = csv.DictWriter(fd, fieldnames=("timestamp", "url", "head", "error"))
+                writer.writeheader()
+                fd.flush()
 
     @property
     def adapters(self):
@@ -149,20 +161,16 @@ class Client:
         if len(urls) > 1:
             LOG.debug("resolved mirror URLs for URL '%s': %s", url, urls)
 
+        got: Head | None = None
         for u in urls:
             try:
                 got = self.head(u, ttl=ttl)
+                if check is not None:
+                    check.check(got, field_filter=lambda f: f in ["content_length", "crc32c", "accept_ranges"])
             except Exception as ex:
-                # The exception is already logged by head method before caching it.
-                LOG.error("Failed to fetch remote head for file: %s, %s", u, ex)
-                continue
-            if check is not None:
-                try:
-                    check.check(got)
-                except ValueError as ex:
-                    LOG.debug("unexpected mirrored file (url='%s'): %s", url, ex)
-                    continue
-            yield got
+                self._log_failure(str(ex), pretty.diff(check, got))
+            else:
+                yield got
 
     def get(self, url: str, stream: Writable, head: Head | None = None) -> Head:
         """It downloads a remote bucket object to a local file path.
@@ -187,7 +195,7 @@ class Client:
                 continue
             adapter = self._adapters.get(got.url)
             try:
-                return adapter.get(url, stream, head=head)
+                return adapter.get(got.url, stream, head=head)
             except ServiceUnavailableError as ex:
                 LOG.debug("service unavailable error received: url='%s' %s", url, ex)
                 with self._lock:
@@ -217,6 +225,17 @@ class Client:
         if not stats:
             return 0.0
         return sum(s.latency for s in stats) / len(stats)
+
+    def _log_failure(self, error: str, data: str) -> None:
+        if self._failures_file is not None and self._failures_writer is not None:
+            with self._lock:
+                event = {
+                    "timestamp": str(datetime.datetime.now()),
+                    "error": error,
+                    "data": data,
+                }
+                self._failures_writer.writerow(event)
+                self._failures_file.flush()
 
     def monitor(self):
         with self._lock:

@@ -185,33 +185,36 @@ class GetCase:
     want_any: list[Head]
     ranges: RangeSet = NO_RANGE
     document_length: int = None
+    content_length: int = None
     want_data: bytes | None = None
 
 
 @cases(
     regular=GetCase(
         SOME_URL,
-        [Head(url=SOME_URL, content_length=len(SOME_BODY), document_length=len(SOME_BODY))],
+        [Head(url=SOME_URL, content_length=len(SOME_BODY))],
         want_data=SOME_BODY,
     ),
     range=GetCase(
         SOME_URL,
-        [Head(SOME_URL, content_length=30, accept_ranges=True, ranges=rangeset("0-29"), document_length=len(SOME_BODY))],
-        ranges=rangeset("0-29"),
-        want_data=SOME_BODY,
+        [Head(SOME_URL, content_length=6, ranges=rangeset("5-10"), document_length=len(SOME_BODY))],
+        ranges=rangeset("5-10"),
+        want_data=SOME_BODY[5:11],
     ),
     mirrors=GetCase(
         MIRRORING_URL,
         [
-            MIRRORED_HEAD,
-            MIRRORED_NO_RANGE_HEAD,
+            Head(MIRRORED_URL, content_length=30),
+            Head(MIRRORED_NO_RANGE_URL, content_length=30),
         ],
         want_data=SOME_BODY,
     ),
 )
 def test_get(case: GetCase, client: Client) -> None:
     stream = create_autospec(Writable, spec_set=True, instance=True)
-    got = client.get(case.url, stream, head=Head(ranges=case.ranges, document_length=case.document_length))
+    got = client.get(
+        case.url, stream, head=Head(ranges=case.ranges, content_length=case.content_length, document_length=case.document_length)
+    )
     assert [] != check_any(got, case.want_any)
     if case.want_data is not None:
         stream.write.assert_called_once_with(case.want_data)

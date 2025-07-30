@@ -16,17 +16,24 @@
 # under the License.
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from esrally.utils import cases, pretty
 
 
+@dataclass(frozen=True)
+class Data:
+    a: str = ""
+    b: int = 0
+
+
 @dataclass
 class DumpCase:
-    o: Any
+    obj: pretty.Object
     want: str
     flags: pretty.Flag = pretty.Flag.NONE
+    field_filter: pretty.FieldFilter | None = None
 
 
 @cases.cases(
@@ -50,19 +57,52 @@ class DumpCase:
         "  3\n"
         "]"
     ),
-    object=DumpCase(
+    dict=DumpCase(
         {"a": "a", "b": 2},
         '{\n'
         '  "a": "a",\n'
         '  "b": 2\n'
         '}'
     ),
-    flat_dict=DumpCase(
-        {"a": {"b": "c"}},
+    dataclass=DumpCase(
+        Data(a="bar", b=5),
         '{\n'
-        '  "a.b": "c"\n'
+        '  "a": "bar",\n'
+        '  "b": 5\n'
+        '}'
+    ),
+    field_filter=DumpCase(
+        Data(a="bar", b=5),
+        '{\n'
+        '  "b": 5\n'
+        '}',
+        field_filter=lambda name: name == "b"
+    ),
+    flat_dict=DumpCase(
+        {"a": {"b": "c"}, "d": Data(a="foo", b=3)},
+        '{\n'
+        '  "a.b": "c",\n'
+        '  "d.a": "foo",\n'
+        '  "d.b": 3\n'
         '}',
         flags=pretty.Flag.FLAT_DICT
+    ),
+    invert_filter=DumpCase(
+        Data(a="bar", b=5),
+        '{\n'
+        '  "a": "bar"\n'
+        '}',
+        flags=pretty.Flag.INVERT_FILTER,
+        field_filter=lambda name: name == "b"
+    ),
+    flat_dict_and_invert_filter=DumpCase(
+        {"a": {"b": "c"}, "d": Data(a="foo", b=3)},
+        '{\n'
+        '  "a.b": "c",\n'
+        '  "d.b": 3\n'
+        '}',
+        flags=pretty.Flag.FLAT_DICT | pretty.Flag.INVERT_FILTER,
+        field_filter=lambda name: name == "d.a"
     ),
     # fmt: on
 )
@@ -70,7 +110,9 @@ def test_dump(case: DumpCase):
     params: dict[str, Any] = {}
     if case.flags:
         params["flags"] = case.flags
-    got = pretty.dump(case.o, **params)
+    if case.field_filter:
+        params["field_filter"] = case.field_filter
+    got = pretty.dump(case.obj, **params)
     assert got == case.want
 
 
@@ -147,7 +189,7 @@ class DiffCase:
     ),
     equal_tuples=DiffCase((2, 3), (2, 3), ""),
     list_and_tuples=DiffCase((3, 4), [3, 4], ""),
-    objects=DiffCase(
+    dicts=DiffCase(
         {"a": 1, "b": 2},
         {"b": 2, "c": 3},
         '  {\n'
@@ -157,6 +199,19 @@ class DiffCase:
         '?         +\n'
         '\n'
         '+   "c": 3\n'
+        '  }'
+    ),
+    dataclasses=DiffCase(
+        Data(a="bar", b=5),
+        Data(a="foo", b=5),
+        '  {\n'
+        '-   "a": "bar",\n'
+        '?         ^^^\n'
+        '\n'
+        '+   "a": "foo",\n'
+        '?         ^^^\n'
+        '\n'
+        '    "b": 5\n'
         '  }'
     ),
     flat_dict=DiffCase(
@@ -178,6 +233,15 @@ class DiffCase:
         '  {\n'
         '    "a": 1,\n'
         '    "b": 2\n'
+        '  }',
+        flags=pretty.Flag.DUMP_EQUALS,
+    ),
+    dataclasses_dump_equals=DiffCase(
+        Data(a="fru", b=5),
+        Data(a="fru", b=5),
+        '  {\n'
+        '    "a": "fru",\n'
+        '    "b": 5\n'
         '  }',
         flags=pretty.Flag.DUMP_EQUALS,
     ),

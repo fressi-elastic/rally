@@ -21,7 +21,7 @@ import importlib
 import logging
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Container, Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -29,6 +29,7 @@ from typing_extensions import Self
 
 from esrally.storage._range import NO_RANGE, RangeSet
 from esrally.types import Config
+from esrally.utils import pretty
 
 LOG = logging.getLogger(__name__)
 
@@ -44,7 +45,8 @@ class Writable(Protocol):
         pass
 
 
-_HEAD_CHECK_IGNORE = frozenset(["url"])
+def _ignore_url(field: str):
+    return field != "url"
 
 
 @dataclass
@@ -57,20 +59,16 @@ class Head:
     crc32c: str | None = None
     date: datetime.datetime | None = None
 
-    def check(self, other: Head, ignore: Container[str] = _HEAD_CHECK_IGNORE) -> None:
-        for field in ("url", "content_length", "accept_ranges", "ranges", "document_length", "crc32c", "date"):
-            if ignore is not None and field in ignore:
-                continue
-            want = getattr(self, field)
-            got = getattr(other, field)
-            if _all_specified(got, want) and got != want:
-                # If both got and want are specified, then they have to match.
-                raise ValueError(f"unexpected '{field}': got {got}, want {want}")
+    def check(self, other: Head, /, field_filter: pretty.FieldFilter = _ignore_url) -> None:
+        want: Mapping[str, Any] = pretty.expand(self, field_filter=field_filter)
 
+        def _field_filter(field: str) -> bool:
+            v = want.get(field)
+            return v or v is False
 
-def _all_specified(*objs: Any) -> bool:
-    # This behaves like all(), but it treats False as True.
-    return all(o or o is False for o in objs)
+        diff = pretty.diff(want, other, field_filter=_field_filter)
+        if diff:
+            raise ValueError(f"unexpected head (+got, -want):\n{diff}")
 
 
 class Adapter(ABC):

@@ -19,8 +19,11 @@ from __future__ import annotations
 import sys
 from abc import abstractmethod
 from collections.abc import Hashable, Iterable, Iterator, Sequence, Set
+from dataclasses import dataclass
 from itertools import chain, islice
 from typing import Any, Final, overload
+
+from typing_extensions import Self
 
 # MAX_LENGTH represents the maximum supported file size
 MAX_LENGTH = sys.maxsize
@@ -118,6 +121,7 @@ class RangeSet(Sequence["Range"], Set["Range"], Hashable):
         raise NotImplementedError
 
 
+@dataclass(frozen=True)
 class EmptyRange(RangeSet):
     """EmptyRange represents an empty set of ranges."""
 
@@ -167,27 +171,24 @@ class EmptyRange(RangeSet):
 NO_RANGE: Final[EmptyRange] = EmptyRange()
 
 
+@dataclass(frozen=True)
 class Range(RangeSet):
 
-    def __init__(self, start: int = 0, end: int = MAX_LENGTH):
+    start: int = 0
+    end: int = MAX_LENGTH
+
+    def __new__(cls, start: int = 0, end: int = MAX_LENGTH) -> Self:
         if start < 0:
             raise ValueError(f"range start can't be negative: {start} < 0")
         if end <= start:
             raise ValueError(f"range end must be greater than start: {end} <= {start}")
-        self._start = start
-        self._end = end
-
-    @property
-    def start(self) -> int:
-        return self._start
-
-    @property
-    def end(self) -> int:
-        return self._end
+        self = object.__new__(cls)
+        self.__init__(start, end)
+        return self
 
     @property
     def size(self):
-        return self._end - self._start
+        return self.end - self.start
 
     def _intersect(self, others: Iterable[Range]) -> Iterator[Range]:
         # pylint: disable=protected-access
@@ -196,28 +197,28 @@ class Range(RangeSet):
                 continue
             if r.start >= self.end:
                 break
-            yield Range(max(r._start, self._start), min(r._end, self._end))
+            yield Range(max(r.start, self.start), min(r.end, self.end))
 
     def _remove(self, others: Iterable[Range]) -> Iterator[Range]:
         # pylint: disable=protected-access
-        position = self._start
+        position = self.start
         for o in _combine(others):
-            if o._start > position:
-                yield Range(position, min(self._end, o._start))
+            if o.start > position:
+                yield Range(position, min(self.end, o.start))
 
-            position = max(position, o._end)
-            if position >= self._end:
+            position = max(position, o.end)
+            if position >= self.end:
                 break
-        if position <= self._start:
+        if position <= self.start:
             yield self
             return
-        if position < self._end:
-            yield Range(position, self._end)
+        if position < self.end:
+            yield Range(position, self.end)
 
     def __str__(self) -> str:
-        if self._end == self._start + 1:
-            return str(self._start)
-        return f"{self._start}-{_pretty_end(self._end)}"
+        if self.end == self.start + 1:
+            return str(self.start)
+        return f"{self.start}-{_pretty_end(self.end)}"
 
     def split(self, max_size: int = MAX_LENGTH) -> tuple[Range | EmptyRange, RangeSet]:
         if max_size == MAX_LENGTH:

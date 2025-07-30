@@ -282,9 +282,13 @@ class Transfer:
                     self.start()
                 assert isinstance(fd, FileWriter)
                 # It downloads the part of the file from a remote location.
-                head = self.client.get(
-                    self.url, fd, head=Head(ranges=fd.ranges, document_length=self._document_length, crc32c=self._crc32c)
-                )
+                if fd.ranges:
+                    check = Head(
+                        ranges=fd.ranges, document_length=self._document_length, content_length=fd.ranges.size, crc32c=self._crc32c
+                    )
+                else:
+                    check = Head(content_length=self._document_length, crc32c=self._crc32c)
+                head = self.client.get(self.url, fd, head=check)
                 if head.document_length is not None:
                     # It checks the size of the file it downloaded the data from.
                     self.document_length = head.document_length
