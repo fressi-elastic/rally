@@ -965,19 +965,10 @@ def race(cfg: types.Config, kill_running_processes=False):
 
 
 def with_actor_system(runnable, cfg: types.Config):
-    process_startup_method: actor.ProcessStartupMethod | None = cfg.opts("actor", "actor.process.startup.method", None, mandatory=False)
-    if process_startup_method is not None:
-        if process_startup_method not in typing.get_args(actor.ProcessStartupMethod):
-            valid_options = ", ".join(str(v) for v in typing.get_args(actor.ProcessStartupMethod))
-            raise ValueError(
-                f"Invalid value '{process_startup_method}' for 'actor.process.startup.method' option. Valid values are: {valid_options}"
-            )
-        actor.set_startup_method(process_startup_method)
-
     already_running = actor.actor_system_already_running()
     LOG.info("Actor system already running locally? [%s]", already_running)
     try:
-        actors = actor.bootstrap_actor_system(try_join=bool(already_running), prefer_local_only=not already_running)
+        actors = actor.init_actor_system(cfg=cfg, try_join=bool(already_running), prefer_local_only=not already_running)
         # We can only support remote benchmarks if we have a dedicated daemon that is not only bound to 127.0.0.1
         cfg.add(config.Scope.application, "system", "remote.benchmarking.supported", already_running)
     # This happens when the admin process could not be started, e.g. because it could not open a socket.

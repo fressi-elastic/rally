@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import traceback
 import typing
@@ -25,7 +26,7 @@ from typing import Any
 import thespian.actors  # type: ignore[import-untyped]
 import thespian.system.messages.status  # type: ignore[import-untyped]
 
-from esrally import exceptions, log
+from esrally import exceptions, log, types
 from esrally.utils import console
 
 LOG = logging.getLogger(__name__)
@@ -202,7 +203,7 @@ class RallyActor(thespian.actors.ActorTypeDispatcher):
 SystemBase = typing.Literal["simpleSystemBase", "multiprocQueueBase", "multiprocTCPBase", "multiprocUDPBase"]
 
 
-__SYSTEM_BASE: SystemBase = "multiprocTCPBase"
+__SYSTEM_BASE: SystemBase = os.getenv("RALLY_ACTOR_SYSTEM_BASE", "multiprocTCPBase")
 
 
 def actor_system_already_running(
@@ -236,9 +237,15 @@ def actor_system_already_running(
 
 
 def use_offline_actor_system() -> None:
+    set_system_base("multiprocQueueBase")
+
+
+def set_system_base(value: SystemBase) -> None:
+    if value not in typing.get_args(SystemBase):
+        raise ValueError(f"invalid system base: '{value}', valid options are {', '.join(typing.get_args(SystemBase))}")
     global __SYSTEM_BASE
-    __SYSTEM_BASE = "multiprocQueueBase"
-    LOG.info("Actor system base set to [%s]", __PROCESS_STARTUP_METHOD)
+    __SYSTEM_BASE = value
+    LOG.info("Actor system base set to [%s]", value)
 
 
 ProcessStartupMethod = typing.Literal[
@@ -251,10 +258,12 @@ ProcessStartupMethod = typing.Literal[
 __PROCESS_STARTUP_METHOD: ProcessStartupMethod | None = None
 
 
-def set_startup_method(method: ProcessStartupMethod) -> None:
+def set_process_startup_method(value: ProcessStartupMethod) -> None:
+    if value not in typing.get_args(SystemBase):
+        raise ValueError(f"invalid system base: '{value}', valid options are {', '.join(typing.get_args(ProcessStartupMethod))}")
     global __PROCESS_STARTUP_METHOD
-    __PROCESS_STARTUP_METHOD = method
-    LOG.info("Actor process startup method set to [%s]", __PROCESS_STARTUP_METHOD)
+    __PROCESS_STARTUP_METHOD = value
+    LOG.info("Actor process startup method set to [%s]", value)
 
 
 def bootstrap_actor_system(
@@ -264,13 +273,13 @@ def bootstrap_actor_system(
     admin_port: int | None = None,
     coordinator_ip: str | None = None,
     coordinator_port: int | None = None,
+    system_base: SystemBase | None = None,
+    process_startup_method: ProcessStartupMethod | None = None,
 ) -> thespian.actors.ActorSystem:
-    system_base = __SYSTEM_BASE
+    system_base = system_base or __SYSTEM_BASE
     capabilities: dict[str, Any] = {}
     log_defs: Any = None
-    if try_join and (
-        system_base != "multiprocTCPBase" or actor_system_already_running(ip=local_ip, port=admin_port, system_base=system_base)
-    ):
+    if try_join and actor_system_already_running(ip=local_ip, port=admin_port, system_base=system_base):
         LOG.info("Try joining already running actor system with system base [%s].", system_base)
     else:
         # All actor system are coordinator unless another coordinator is known to exist.
@@ -299,7 +308,7 @@ def bootstrap_actor_system(
             if coordinator_ip and local_ip and coordinator_ip != local_ip:
                 capabilities["coordinator"] = False
 
-        process_startup_method: ProcessStartupMethod | None = __PROCESS_STARTUP_METHOD
+        process_startup_method = process_startup_method or __PROCESS_STARTUP_METHOD
         if process_startup_method:
             capabilities["Process Startup Method"] = process_startup_method
 
@@ -320,10 +329,62 @@ def bootstrap_actor_system(
     return actor_system
 
 
-def resolve(host: str, port: int | None = None, family: int = socket.AF_INET, proto: int = socket.IPPROTO_TCP) -> tuple[str, int | None]:
+def resolve(host: str, port: int | None = None, system_base: SystemBase | None = None) -> tuple[str, int | None]:
+    host = host.strip()
+    if not host:
+        raise ValueError("host cannot be empty")
+    if host.startswith("127."):
+        return host, port
+
+    if system_base is None:
+        system_base = __SYSTEM_BASE
+    proto: int = {
+        "multiprocTCPBase": socket.IPPROTO_TCP,
+        "multiprocUDPBase": socket.IPPROTO_UDP
+    }.get(system_base, 0)
+
     address_info: tuple[Any, Any, Any, Any, tuple[Any, ...]]
-    for address_info in socket.getaddrinfo(host, port=port or None, family=family, proto=proto):
+    for address_info in socket.getaddrinfo(host, port=port or None, family=socket.AF_INET, proto=proto):
         address = address_info[4]
         if len(address) == 2 and isinstance(address[0], str) and isinstance(address[1], int):
             host, port = address
     return host, port or None
+
+
+def init_actor_system(cfg: types.Config, try_join: bool = False, prefer_local_only: bool = False) -> thespian.actors.ActorSystem:
+    system_base: SystemBase | None = cfg.opts(
+        "actor", "actor.system.base", "", mandatory=False
+    ).strip() or None
+    process_startup_method: ProcessStartupMethod | None = cfg.opts(
+        "actor", "actor.process.startup.method", "", mandatory=False
+    ).strip() or None
+    local_ip: str | None = cfg.opts(
+        "actor", "actor.local.ip", "", mandatory=False
+    ).strip() or None
+    admin_port: int | None = int(cfg.opts(
+        "actor", "actor.admin.port", "", mandatory=False
+    ).strip() or 0) or None
+    coordinator_ip: str | None = cfg.opts(
+        "actor", "actor.coordinator.ip", "", mandatory=False
+    ).strip() or None
+    coordinator_port: int | None = int(cfg.opts(
+        "actor", "actor.coordinator.port", "", mandatory=False
+    ).strip() or 0) or None
+
+    actor_system = bootstrap_actor_system(
+        try_join=try_join,
+        prefer_local_only=prefer_local_only,
+        local_ip=local_ip,
+        admin_port=admin_port,
+        coordinator_ip=coordinator_ip,
+        coordinator_port=coordinator_port,
+        system_base=system_base,
+        process_startup_method=process_startup_method
+    )
+
+    if system_base:
+        set_system_base(system_base)
+    if process_startup_method:
+        set_process_startup_method(process_startup_method)
+
+    return actor_system

@@ -44,6 +44,11 @@ Section = Literal[
 ]
 Key = Literal[
     "actor.process.startup.method",
+    "actor.system.base",
+    "actor.local.ip",
+    "actor.admin.port",
+    "actor.coordinator.ip",
+    "actor.coordinator.port",
     "add.chart_name",
     "add.chart_type",
     "add.config.option",
