@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
 from collections.abc import Mapping, MutableMapping
 from datetime import datetime
 from typing import Any
@@ -77,7 +78,7 @@ class HTTPAdapter(Adapter):
             res.raise_for_status()
         return head_from_headers(url, res.headers)
 
-    def get(self, url: str, stream: Writable, want: Head | None = None) -> Head:
+    def get(self, url: str, stream: Writable, want: Head | None = None, cancelled: multiprocessing.Event | None = None) -> Head:
         headers: MutableMapping[str, str] = CaseInsensitiveDict()
         head_to_headers(want, headers)
         with self.session.get(url, stream=True, allow_redirects=True, headers=headers) as res:
@@ -92,6 +93,8 @@ class HTTPAdapter(Adapter):
             for chunk in res.iter_content(self.chunk_size):
                 if chunk:
                     stream.write(chunk)
+                if cancelled and cancelled.is_set():
+                    break
         return got
 
 

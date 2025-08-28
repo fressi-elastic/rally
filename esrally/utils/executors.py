@@ -16,37 +16,25 @@
 # under the License.
 from __future__ import annotations
 
-import concurrent.futures
 import copy
 import dataclasses
 import logging
 import multiprocessing
 import os
 import typing
+from collections import defaultdict, deque
 from collections.abc import Callable
+from concurrent import futures
+from typing import Any, Protocol, runtime_checkable, overload, TypeVar
 
 from thespian import actors
-from typing_extensions import Self
+from typing_extensions import Self, TypeAlias
 
 from esrally import actor, log, types
+from esrally.actor import BaseActor, ActorConfig
 from esrally.utils import console, convert
 
 LOG = logging.getLogger(__name__)
-
-
-@typing.runtime_checkable
-class ExecutorProtocol(typing.Protocol):
-
-    def submit(self, fn, /, *args, **kwargs):
-        """Submits a callable to be executed with the given arguments.
-
-        Schedules the callable to be executed as fn(*args, **kwargs) and returns
-        a Future instance representing the execution of the callable.
-
-        Returns:
-            A Future representing the given call.
-        """
-
 
 MAX_WORKERS: int = 63
 WORKERS_NAME_PREFIX: str = "esrally-executor-worker"
@@ -69,69 +57,39 @@ class ExecutorsConfig(actor.ActorConfig):
         return convert.to_bool(self.opts("executors", "executors.use_threading", USE_THREADING, False))
 
 
-@dataclasses.dataclass
-class Task:
-    func: typing.Callable
-    args: tuple[typing.Any, ...] = tuple()
-    kwargs: dict[str, typing.Any] | None = None
-
-    def __call__(self):
-        try:
-            result = self.func(*self.args, **(self.kwargs or {}))
-            self.handle_result(result, None)
-            return result
-        except Exception as ex:
-            self.handle_result(None, ex)
-            raise
-
-    def handle_result(self, result: typing.Any, error: Exception | None) -> None:
-        if error is not None:
-            LOG.exception("Unhandled exception: %s", error)
+TaskResultHandler: TypeAlias = Callable[["ExecutorResult"], Any]
 
 
-@dataclasses.dataclass
-class Executor:
-    """This is a wrapper class for concrete asynchronous executors.
+R = TypeVar("R")
 
-    Executor protocol is used by Transfer class to submit tasks execution.
-    Notable implementation of this protocol is concurrent.futures.ThreadPoolExecutor[1] class.
-
-    [1] https://docs.python.org/3/library/concurrent.futures.html#concurrent.futures.ThreadPoolExecutor
-    """
-
-    executor: ExecutorProtocol
-    max_workers: int = 0
+@runtime_checkable
+class Executor(Protocol):
 
     @classmethod
     def from_config(cls, cfg: types.AnyConfig = None) -> Executor:
         cfg = ExecutorsConfig.from_config(cfg)
         if cfg.use_threading:
-            executor = ThreadPoolExecutor.from_config(cfg)
+            return ThreadPoolExecutor.from_config(cfg)
         else:
-            executor = ProcessPoolExecutor.from_config(cfg)
-        return cls(executor=executor, max_workers=cfg.max_workers)
+            return ProcessPoolExecutor.from_config(cfg)
 
-    def shutdown(self) -> None:
-        if hasattr(self.executor, "shutdown"):
-            self.executor.shutdown()
+    @overload
+    def submit(self, fn: Callable[[], R]) -> futures.Future[R]: ...
 
-    def submit(self, fn, /, *args, **kwargs):
-        """Submits a callable to be executed with the given arguments.
+    @overload
+    def submit(self, fn: Callable[[...], R], /, *args: typing.Any, **kwargs: typing.Any) -> futures.Future[R]: ...
+
+    def submit(self, fn, /, *args, **kwargs) -> futures.Future[R]:
+        """It submits a callable to be executed with the given arguments.
 
         Schedules the callable to be executed as fn(*args, **kwargs) and returns
         a Future instance representing the execution of the callable.
 
-        Returns:
-            A Future representing the given call.
+        :returns: Future instance representing the execution of the callable.
         """
-        return self.executor.submit(self.task(fn, *args, **kwargs))
-
-    def task(self, fn, /, *args, **kwargs) -> Callable[[], typing.Any]:
-        """It allows wrapping user function to be executed with the given arguments."""
-        return Task(func=fn, args=args, kwargs=kwargs)
 
 
-class ThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+class ThreadPoolExecutor(futures.ThreadPoolExecutor, Executor):
 
     @classmethod
     def from_config(cls, cfg: types.AnyConfig = None) -> Self:
@@ -140,7 +98,7 @@ class ThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
         return cls(max_workers=cfg.max_workers, thread_name_prefix=WORKERS_NAME_PREFIX)
 
 
-class ProcessPoolExecutor(concurrent.futures.ProcessPoolExecutor):
+class ProcessPoolExecutor(futures.ProcessPoolExecutor, Executor):
 
     @classmethod
     def from_config(cls, cfg: types.AnyConfig = None) -> Self:
@@ -151,16 +109,6 @@ class ProcessPoolExecutor(concurrent.futures.ProcessPoolExecutor):
             mp_context=multiprocessing.get_context(cfg.process_startup_method),
             initializer=ProcessPoolHelper.from_config(cfg).initialize_subprocess,
         )
-
-
-@dataclasses.dataclass
-class LogRecord:
-    record: logging.LogRecord
-
-
-class ProcessPoolHelperActor(actor.BaseActor):
-    def receiveMsg_LogRecord(self, msg: LogRecord, sender: actors.ActorAddress) -> None:
-        logging.root.handle(msg.record)
 
 
 @dataclasses.dataclass
@@ -202,6 +150,11 @@ class ProcessPoolHelper:
         actors.ActorSystem().ask(self.actor, actors.ActorExitRequest())
 
 
+@dataclasses.dataclass
+class LogForwarderRecord:
+    record: logging.LogRecord
+
+
 class LogForwarderHandler(logging.Handler):
 
     def __init__(self, level: int, actor_addr: actors.ActorAddress) -> None:
@@ -211,7 +164,7 @@ class LogForwarderHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         actors.ActorSystem().tell(self.actor_addr, self.prepare(record))
 
-    def prepare(self, record: logging.LogRecord) -> LogRecord:
+    def prepare(self, record: logging.LogRecord) -> LogForwarderRecord:
         """
         Prepare a record for queuing. The object returned by this method is
         enqueued.
@@ -242,4 +195,127 @@ class LogForwarderHandler(logging.Handler):
         record.exc_info = None
         record.exc_text = None
         record.stack_info = None
-        return LogRecord(record)
+        return LogForwarderRecord(record)
+
+
+class ProcessPoolHelperActor(actor.BaseActor):
+
+    @staticmethod
+    def receiveMsg_ExecutorLogRecord(self, msg: LogForwarderRecord, sender: actors.ActorAddress) -> None:
+        logging.root.handle(msg.record)
+
+
+@dataclasses.dataclass
+class ActorExecutorTask:
+    func: Callable
+    args: tuple[Any, ...] = tuple()
+    kwargs: dict[str, Any] | None = None
+    handlers: set[actors.ActorAddress] = dataclasses.field(default_factory=set)
+
+    def __call__(self):
+        try:
+            result = self.func(*self.args, **(self.kwargs or {}))
+            self.handle_result(ActorExecutorResult(self, result, None))
+            return result
+        except Exception as ex:
+            self.handle_result(ActorExecutorResult(self, None, ex))
+            raise
+
+    def handle_result(self, result: ActorExecutorResult) -> None:
+        handled = False
+        for handler in self.handlers:
+            try:
+                actors.ActorSystem().tell(handler, result)
+                handled = True
+            except Exception:
+                LOG.exception("error handling task result (handler=%s, result=%s)", handler, result)
+        if not handled:
+            if result.error is not None:
+                LOG.exception("unhandled executor task error (task=%s)", result.task, exc_info=result.error)
+            if result.value is not None:
+                LOG.warning("unhandled executor task result (task=%s, result=%s)", result.task, result.value)
+
+
+@dataclasses.dataclass
+class ActorExecutorResult:
+    task: ActorExecutorTask
+    value: Any = None
+    error: Exception | None = None
+
+
+class ExecutorActor(BaseActor, Executor):
+    """This is a wrapper actor class that integrates with an Executor to run asynchronous tasks.
+    """
+
+    Config = ExecutorsConfig
+    Executor = Executor
+
+    def __init__(self):
+        super().__init__()
+        self._executor: Executor | None = None
+        self._workers: int = 0
+        self._max_workers: int = max(1, self.cfg.max_workers)
+        self._paused_tasks: deque[ActorExecutorTask] = deque()
+
+    @actor.no_retry()
+    def receiveMsg_ActorConfig(self, cfg: ActorConfig, sender: actors.ActorAddress):
+        cfg = self.Config.from_config(cfg)
+        self.max_workers = cfg.max_workers
+        return self.SUPER
+
+    @actor.no_retry()
+    def receiveMsg_ActorExitRequest(self, msg: actors.ActorExitRequest, sender: actors.ActorAddress) -> None:
+        if hasattr(self._executor, "shutdown"):
+            self._executor.shutdown()
+            self._executor = None
+
+    @actor.no_retry()
+    def receiveMsg_ActorExecutorTask(self, task: ActorExecutorTask, sender: actors.ActorAddress) -> None:
+        if self._workers >= self.max_workers:
+            # The executor is busy, the task will wait on actor queue.
+            self._paused_tasks.append(task)
+            return
+        task.handlers.add(self.myAddress)
+        self.executor.submit(task)
+        self._workers += 1
+
+    @actor.no_retry()
+    def receiveMsg_ActorExecutorResult(self, result: ActorExecutorResult, sender: actors.ActorAddress) -> None:
+        self._workers -= 1
+        self.unpause_tasks()
+        self.handle_executor_result(result)
+
+    def handle_executor_result(self, result: ActorExecutorResult) -> None:
+        if result.error is not None:
+            raise result.error
+
+    @property
+    def max_workers(self) -> int:
+        return max(1, min(self._max_workers, getattr(self.executor, 'max_workers', self.cfg.max_workers)))
+
+    @max_workers.setter
+    def max_workers(self, value: int) -> None:
+        if value < 1:
+            raise ValueError("max_workers must be a positive integer")
+        self._max_workers = value
+
+    @property
+    def executor(self) -> Executor:
+        if self._executor is None:
+            self._executor = self.Executor.from_config(cfg=self.cfg)
+        return self._executor
+
+    def submit(self, fn: Callable, /, *args, **kwargs):
+        """Submits a callable to be executed with the given arguments.
+
+        Schedules the callable to be executed as fn(*args, **kwargs) and returns
+        a Future instance representing the execution of the callable.
+
+        Returns:
+            A Future representing the given call.
+        """
+        self.receiveMsg_ActorExecutorTask(ActorExecutorTask(fn, *args, **kwargs, {self.myAddress}), self.myAddress)
+
+    def unpause_tasks(self):
+        while self._workers < self.max_workers and self._paused_tasks:
+            self.receiveMsg_ActorExecutorTask(self._paused_tasks.popleft(), self.myAddress)

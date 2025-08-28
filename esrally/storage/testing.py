@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import copy
+import multiprocessing
 from collections.abc import Iterable, Mapping
 
 from typing_extensions import Self
@@ -54,7 +55,7 @@ class DummyAdapter(Adapter):
         except KeyError:
             raise FileNotFoundError from None
 
-    def get(self, url: str, stream: Writable, want: Head | None = None) -> Head:
+    def get(self, url: str, stream: Writable, want: Head | None = None, cancelled: multiprocessing.Event | None = None) -> Head:
         ranges: RangeSet = NO_RANGE
         if want is not None:
             ranges = want.ranges

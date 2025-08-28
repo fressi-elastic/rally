@@ -531,8 +531,14 @@ class FileDescriptor:
     def close(self):
         with self._lock:
             if self._fd is not None:
+                self._fd.flush()
                 self._fd.close()
             self._fd = None
+
+    @property
+    def done(self) -> Range:
+        with self._lock:
+            return Range(self.ranges.start, self.position)
 
     def __enter__(self):
         return self
@@ -568,8 +574,3 @@ class FileWriter(FileDescriptor):
                 self.position += size
             if len(data) > size:
                 raise RangeError(f"data size exceeds file range: {len(data)} > {size}", self.ranges)
-
-    def flush(self):
-        with self._lock:
-            if self._fd is not None:
-                self._fd.flush()

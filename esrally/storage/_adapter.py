@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import importlib
 import logging
+import multiprocessing
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Container
@@ -102,7 +103,7 @@ class Adapter(ABC):
         """
 
     @abstractmethod
-    def get(self, url: str, stream: Writable, want: Head | None = None) -> Head:
+    def get(self, url: str, stream: Writable, want: Head | None = None, canceled: multiprocessing.Event | None = None) -> Head:
         """It downloads a remote bucket object to a local file path.
 
         :param url: it represents the URL of the remote file object.
@@ -112,6 +113,7 @@ class Adapter(ABC):
             - content_length: the number of bytes to transfer.
             - crc32c the CRC32C checksum of the file.
             - date: the date the file has been modified.
+        :param canceled: it allows to cancel blocking operation.
         :raises ServiceUnavailableError: in case on temporary service failure.
         """
 

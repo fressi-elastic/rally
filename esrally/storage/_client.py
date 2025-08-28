@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import threading
 import time
 import urllib.parse
@@ -155,7 +156,7 @@ class Client:
         assert head is not None
         return head
 
-    def resolve(self, url: str, want: Head | None, ttl: float | None = None) -> Iterator[Head]:
+    def resolve(self, url: str, want: Head | None, ttl: float | None = None, canceled: multiprocessing.Event | None = None) -> Iterator[Head]:
         """It looks up mirror list for given URL and yield mirror heads.
         :param url: the remote file URL at its mirrored source location.
         :param want: extra parameters to mach remote heads.
@@ -163,6 +164,7 @@ class Client:
             - crc32c: if not none it will filter out mirrors which file has an unexpected crc32c checksum.
             - accept_ranges: if True it will filter out mirrors that are not supporting ranges.
         :param ttl: the time to live value (in seconds) to use for cached heads retrieval.
+        :param canceled: if not none it will be checked to see if the task has been cancelled.
         :return: iterator over mirror URLs
         """
 
@@ -189,6 +191,8 @@ class Client:
             ttl = self._resolve_ttl
 
         for u in urls:
+            if canceled and canceled.is_set():
+                break
             try:
                 got = self.head(u, ttl=ttl)
                 if want is not None:
@@ -204,7 +208,7 @@ class Client:
             else:
                 yield got
 
-    def get(self, url: str, stream: Writable, want: Head | None = None) -> Head:
+    def get(self, url: str, stream: Writable, want: Head | None = None, canceled: multiprocessing.Event | None = None) -> Head:
         """It downloads a remote bucket object to a local file path.
 
         :param url: the URL of the remote file.
@@ -213,6 +217,7 @@ class Client:
             - document_length: the document length of the file to transfer.
             - crc32c: the crc32c checksum of the file to transfer.
             - ranges: the portion of the file to transfer.
+        :param canceled: whether to cancel download.
         :raises ServiceUnavailableError: in case on temporary service failure.
         """
         if want is None:
@@ -221,7 +226,7 @@ class Client:
             want_head = Head(accept_ranges=True, content_length=want.document_length, date=want.date, crc32c=want.crc32c)
         else:
             want_head = Head(content_length=want.content_length, date=want.date, crc32c=want.crc32c)
-        for got in self.resolve(url, want=want_head):
+        for got in self.resolve(url, want=want_head, canceled=canceled):
             assert got.url is not None
             adapter = self._adapters.get(got.url)
             connections = self._server_connections(got.url)
@@ -231,7 +236,7 @@ class Client:
                 LOG.debug("connection limit exceeded for url '%s'", url)
                 continue
             try:
-                return adapter.get(got.url, stream, want=want)
+                return adapter.get(got.url, stream, want=want, canceled=canceled)
             except ServiceUnavailableError as ex:
                 LOG.warning("service unavailable error received: url='%s' %s", url, ex)
                 with self._lock:

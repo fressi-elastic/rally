@@ -46,16 +46,77 @@ class BenchmarkCancelled:
     """It indicates that the benchmark has been cancelled (by the user)."""
 
 
+class ActorConfig(config.Config):
+
+    @property
+    def system_base(self) -> SystemBase:
+        return self.opts("actor", "actor.system.base", default_value=SYSTEM_BASE, mandatory=False)
+
+    @property
+    def fallback_system_base(self) -> SystemBase:
+        return self.opts("actor", "actor.fallback.system.base", default_value=FALLBACK_SYSTEM_BASE, mandatory=False)
+
+    @property
+    def ip(self) -> str | None:
+        return self.opts("actor", "actor.ip", default_value=ACTOR_IP, mandatory=False) or None
+
+    @property
+    def admin_port(self) -> int | None:
+        return int(self.opts("actor", "actor.admin.port", default_value=ADMIN_PORT, mandatory=False)) or None
+
+    @property
+    def coordinator_ip(self) -> str | None:
+        return self.opts("actor", "actor.coordinator.ip", default_value=COORDINATOR_IP, mandatory=False).strip() or None
+
+    @property
+    def coordinator_port(self) -> int | None:
+        return int(self.opts("actor", "actor.coordinator.port", default_value=COORDINATOR_PORT, mandatory=False)) or None
+
+    @property
+    def process_startup_method(self) -> ProcessStartupMethod | None:
+        return self.opts("actor", "actor.process.startup.method", default_value="", mandatory=False).strip() or None
+
+
 class BaseActor(actors.ActorTypeDispatcher):
 
-    def __init__(self, *args: typing.Any, **kw: typing.Any):
-        super().__init__(*args, **kw)
+    Config = ActorConfig
+
+    @classmethod
+    def from_config(cls, cfg: types.AnyConfig = None) -> actors.ActorAddress:
+        cfg = cls.Config.from_config(cfg)
+        actor_system = system_from_config(cfg)
+        actor_address = actor_system.createActor(actorClass=cls, targetActorRequirements=cls.target_actor_requirements())
+        actor_system.tell(actor_address, cfg)
+        return actor_address
+
+    @classmethod
+    def target_actor_requirements(cls) -> dict[str, Any]:
+        return {}
+
+    # The method name is required by the actor framework
+    # noinspection PyPep8Naming
+    @classmethod
+    def actorSystemCapabilityCheck(cls, capabilities, requirements) -> bool:
+        for name, value in requirements.items():
+            current = capabilities.get(name, None)
+            if current != value:
+                # A single mismatch event is not a problem by itself as long as at least one actor system instance
+                # matches the requirements.
+                return False
+        return True
+
+    def __init__(self, cfg: types.AnyConfig = None):
+        super().__init__()
+        self.cfg = self.Config.from_config(cfg)
         log.post_configure_logging()
         console.set_assume_tty(assume_tty=False)
         cls = type(self)
-        self.actor_name = f"{cls.__module__}:{cls.__name__}"
-        self.logger = logging.getLogger(self.actor_name)
-        self.logger.debug("Initializing actor: pid=%d, name='%s'.", os.getpid(), self.actor_name)
+        self.logger = logging.getLogger(f"{cls.__module__}:{cls.__name__}")
+        self.logger.debug("Initializing actor (pid=%d): '%s'.", os.getpid(), self)
+
+    def receiveMsg_ActorConfig(self, msg: ActorConfig, sender: actors.ActorAddress) -> None:
+        self.logger.debug("Received configuration.")
+        self.cfg = msg
 
     def receiveMsg_ActorExitRequest(self, msg: actors.ActorExitRequest, sender: actors.ActorAddress) -> None:
         self.logger.debug("Received exit request from '%s': %s", sender, msg)
@@ -65,6 +126,33 @@ class BaseActor(actors.ActorTypeDispatcher):
 
     def receiveUnrecognizedMessage(self, msg: actors.PoisonMessage, sender: actors.ActorAddress) -> None:
         self.logger.warning("Received unrecognized message from '%s': %s", sender, msg)
+
+
+class LocalActor(BaseActor):
+    """Actor class ensured to be created only on the host where it is being required.
+    """
+
+    @classmethod
+    def target_actor_requirements(cls) -> dict[str, Any]:
+        return {"hostname": socket.gethostname()}
+
+    @classmethod
+    def actorSystemCapabilityCheck(cls, capabilities, requirements) -> bool:
+        try:
+            if requirements.pop("hostname") != socket.gethostname():
+                return False
+        except KeyError:
+            raise ValueError(f"'hostname' not found in requirements for actor of class {cls.__name__}/")
+        return super().actorSystemCapabilityCheck(capabilities, requirements)
+
+
+class SingletonActor(LocalActor):
+    """Actor class ensured to be unique in any actor host.
+    """
+
+    @classmethod
+    def globalName(cls) -> str | None:
+        return f"{cls.__module__}:{cls.__name__}@{socket.gethostname()}"
 
 
 M = typing.TypeVar("M")
@@ -113,23 +201,11 @@ def no_retry() -> Callable[[ActorMessageHandler[M]], ActorMessageHandler[M]]:
 
 class RallyActor(BaseActor):
 
-    def __init__(self, *args: Any, **kw: Any):
-        super().__init__(*args, **kw)
+    def __init__(self):
+        super().__init__()
         self.children: list[actors.ActorAddress] = []
         self.received_responses: list[typing.Any] = []
         self.status = None
-
-    # The method name is required by the actor framework
-    # noinspection PyPep8Naming
-    @staticmethod
-    def actorSystemCapabilityCheck(capabilities, requirements):
-        for name, value in requirements.items():
-            current = capabilities.get(name, None)
-            if current != value:
-                # A single mismatch event is not a problem by itself as long as at least one actor system instance
-                # matches the requirements.
-                return False
-        return True
 
     def transition_when_all_children_responded(self, sender, msg, expected_status, new_status, transition):
         """
@@ -346,37 +422,6 @@ ADMIN_PORT = 0
 COORDINATOR_IP = ""
 COORDINATOR_PORT = 0
 PROCESS_STARTUP_METHOD: ProcessStartupMethod | None = None
-
-
-class ActorConfig(config.Config):
-
-    @property
-    def system_base(self) -> SystemBase:
-        return self.opts("actor", "actor.system.base", default_value=SYSTEM_BASE, mandatory=False)
-
-    @property
-    def fallback_system_base(self) -> SystemBase:
-        return self.opts("actor", "actor.fallback.system.base", default_value=FALLBACK_SYSTEM_BASE, mandatory=False)
-
-    @property
-    def ip(self) -> str | None:
-        return self.opts("actor", "actor.ip", default_value=ACTOR_IP, mandatory=False) or None
-
-    @property
-    def admin_port(self) -> int | None:
-        return int(self.opts("actor", "actor.admin.port", default_value=ADMIN_PORT, mandatory=False)) or None
-
-    @property
-    def coordinator_ip(self) -> str | None:
-        return self.opts("actor", "actor.coordinator.ip", default_value=COORDINATOR_IP, mandatory=False).strip() or None
-
-    @property
-    def coordinator_port(self) -> int | None:
-        return int(self.opts("actor", "actor.coordinator.port", default_value=COORDINATOR_PORT, mandatory=False)) or None
-
-    @property
-    def process_startup_method(self) -> ProcessStartupMethod | None:
-        return self.opts("actor", "actor.process.startup.method", default_value="", mandatory=False).strip() or None
 
 
 def system_from_config(cfg: types.AnyConfig = None) -> actors.ActorSystem:

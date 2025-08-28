@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import os
 import urllib.parse
 from collections.abc import Mapping
@@ -68,7 +69,7 @@ class S3Adapter(Adapter):
         res = self._s3.head_object(Bucket=address.bucket, Key=address.key)
         return head_from_response(url, res)
 
-    def get(self, url: str, stream: Writable, want: Head | None = None) -> Head:
+    def get(self, url: str, stream: Writable, want: Head | None = None, cancelled: multiprocessing.Event | None = None) -> Head:
         headers: dict[str, Any] = {}
         head_to_headers(want, headers)
 
@@ -83,6 +84,8 @@ class S3Adapter(Adapter):
         for chunk in body.iter_chunks(self.chunk_size):
             if chunk:
                 stream.write(chunk)
+            if cancelled and cancelled.is_set():
+                break
         return got
 
     _s3_client = None
