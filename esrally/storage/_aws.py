@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 import boto3
@@ -27,7 +27,7 @@ from botocore.response import StreamingBody
 from typing_extensions import Self
 
 from esrally import types
-from esrally.storage._adapter import Adapter, Head, Writable
+from esrally.storage._adapter import Adapter, Head
 from esrally.storage._config import DEFAULT_STORAGE_CONFIG, StorageConfig
 from esrally.storage._http import (
     head_to_headers,
@@ -68,7 +68,7 @@ class S3Adapter(Adapter):
         res = self._s3.head_object(Bucket=address.bucket, Key=address.key)
         return head_from_response(url, res)
 
-    def get(self, url: str, stream: Writable, want: Head | None = None) -> Head:
+    def get(self, url: str, want: Head | None = None) -> tuple[Head, Iterator[bytes]]:
         headers: dict[str, Any] = {}
         head_to_headers(want, headers)
 
@@ -80,10 +80,7 @@ class S3Adapter(Adapter):
         body: StreamingBody | None = res.get("Body")
         if body is None:
             raise RuntimeError("S3 client returned no body.")
-        for chunk in body.iter_chunks(self.chunk_size):
-            if chunk:
-                stream.write(chunk)
-        return got
+        return got, body.iter_chunks(self.chunk_size)
 
     _s3_client = None
 

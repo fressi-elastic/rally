@@ -20,25 +20,20 @@ import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
 from esrally import config, types
 from esrally.storage._adapter import Head
-from esrally.storage._manager import (
-    TransferManager,
-    shutdown_transfer_manager,
-    transfer_manager,
-)
-from esrally.storage.testing import DummyAdapter, DummyExecutor
-from esrally.utils import executors
+from esrally.storage._config import StorageConfig
+from esrally.storage._manager import TransferManager
+from esrally.storage.testing import DummyAdapter
 from esrally.utils.cases import cases
 
 
-@pytest.fixture(scope="function", params=[None, "some-name"])
+@pytest.fixture(scope="function")
 def cfg(request, tmpdir: os.PathLike) -> types.Config:
-    cfg = config.Config(config_name=request.param)
+    cfg = StorageConfig.from_config()
     cfg.add(
         config.Scope.application,
         "storage",
@@ -49,23 +44,13 @@ def cfg(request, tmpdir: os.PathLike) -> types.Config:
     return cfg
 
 
-@pytest.fixture(scope="function")
-def dummy_executor(monkeypatch: pytest.MonkeyPatch) -> Iterator[DummyExecutor]:
-    executor = DummyExecutor()
-    monkeypatch.setattr(executors.Executor, "from_config", lambda cfg: executor)
-    try:
-        yield executor
-    finally:
-        executor.shutdown()
-
-
 @pytest.fixture
-def manager(cfg: types.Config, dummy_executor: DummyExecutor) -> Iterator[TransferManager]:
+def manager(cfg: types.Config) -> Iterator[TransferManager]:
     manager = TransferManager.from_config(cfg)
     try:
         yield manager
     finally:
-        manager.shutdown()
+        pass  # manager.shutdown()
 
 
 SIMPLE_URL = "http://example.com"
@@ -85,7 +70,7 @@ class StorageAdapter(DummyAdapter):
 class GetCase:
     url: str
     path: os.PathLike | str | None = None
-    document_length: int | None = None
+    expected_size: int | None = None
     want_data: bytes | None = None
     want_error: tuple[type[Exception], ...] = tuple()
 
@@ -93,66 +78,31 @@ class GetCase:
 @cases(
     simple=GetCase(url=SIMPLE_URL, want_data=SIMPLE_DATA),
     path=GetCase(url=SIMPLE_URL, want_data=SIMPLE_DATA, path="some/path"),
-    document_length=GetCase(url=SIMPLE_URL, want_data=SIMPLE_DATA, document_length=len(SIMPLE_DATA)),
-    mismach_document_length=GetCase(url=SIMPLE_URL, want_error=(ValueError,), document_length=len(SIMPLE_DATA) - 1),
+    expected_size=GetCase(url=SIMPLE_URL, want_data=SIMPLE_DATA, expected_size=len(SIMPLE_DATA)),
+    unexpected_size=GetCase(url=SIMPLE_URL, want_error=(ValueError,), expected_size=len(SIMPLE_DATA) - 1),
 )
-def test_get(case: GetCase, manager: TransferManager, dummy_executor: DummyExecutor, tmpdir: os.PathLike) -> None:
+def test_get(case: GetCase, manager: TransferManager, tmpdir: os.PathLike) -> None:
     kwargs: dict[str, Any] = {}
     if case.path is not None:
         kwargs["path"] = os.path.join(tmpdir, case.path)
-    if case.document_length is not None:
-        kwargs["document_length"] = case.document_length
+    if case.expected_size is not None:
+        kwargs["expected_size"] = case.expected_size
 
     try:
         tr = manager.get(url=case.url, **kwargs)
     except case.want_error:
         return
-
-    assert not case.want_error
-
-    got = tr.wait(timeout=0.0)
-    assert not got
-
     if case.path is not None:
         assert os.path.join(tmpdir, case.path) == tr.path
 
-    dummy_executor.execute_tasks()
-    got = tr.wait(timeout=0.0)
-    assert got
+    if case.expected_size is not None:
+        assert os.path.getsize(tr.path) == case.expected_size
+
+    tr = manager.get(url=case.url, wait=True, **kwargs)
+    assert tr.finished
 
     if case.want_data is not None:
         assert os.path.exists(tr.path)
         if case.want_data is not None:
             with open(tr.path, "rb") as f:
                 assert f.read() == SIMPLE_DATA
-    if case.document_length is not None:
-        assert os.path.getsize(tr.path) == case.document_length
-
-
-@pytest.fixture(scope="function")
-def managers() -> Iterator[dict[str | None, TransferManager]]:
-    with patch("esrally.storage._manager._MANAGERS", {}) as managers:
-        yield managers
-
-
-def test_transfer_manager(cfg: types.Config, tmpdir: os.PathLike, managers: dict[str | None, TransferManager]) -> None:
-    assert cfg.name not in managers
-
-    got = transfer_manager(cfg)
-    assert isinstance(got, TransferManager)
-    assert got is managers[cfg.name]
-
-    tr = got.get(url=SIMPLE_URL, document_length=len(SIMPLE_DATA))
-    assert tr.wait(timeout=60.0)
-    assert os.path.exists(tr.path)
-    assert os.path.getsize(tr.path) == len(SIMPLE_DATA)
-
-    assert got is transfer_manager(cfg)
-    assert got is transfer_manager(cfg.name)
-    assert got is managers[cfg.name]
-
-    assert shutdown_transfer_manager(cfg.name)
-    assert cfg.name not in managers
-
-    assert not shutdown_transfer_manager(cfg.name)
-    assert cfg.name not in managers

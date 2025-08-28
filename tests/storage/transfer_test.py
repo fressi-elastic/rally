@@ -25,7 +25,7 @@ from urllib.parse import urlparse
 import pytest
 
 from esrally.config import Config
-from esrally.storage._adapter import Head, Writable
+from esrally.storage._adapter import Head
 from esrally.storage._client import Client
 from esrally.storage._config import DEFAULT_STORAGE_CONFIG
 from esrally.storage._range import rangeset
@@ -45,13 +45,13 @@ class DummyClient(Client):
     def head(self, url: str, ttl: float | None = None) -> Head:
         return Head(url, content_length=len(DATA), accept_ranges=True, crc32c=CRC32C)
 
-    def get(self, url: str, stream: Writable, want: Head | None = None) -> Head:
+    def get(self, url: str, want: Head | None = None) -> tuple[Head, Iterator[bytes]]:
         data = DATA
+        document_length: int | None = None
         if want is not None and want.ranges:
+            document_length = len(data)
             data = data[want.ranges.start : want.ranges.end]
-        if data:
-            stream.write(data)
-        return Head(url, ranges=want.ranges, content_length=len(data), document_length=len(DATA), crc32c=CRC32C)
+        return Head(url, ranges=want.ranges, content_length=len(data), document_length=document_length, crc32c=CRC32C), iter([data])
 
 
 @pytest.fixture

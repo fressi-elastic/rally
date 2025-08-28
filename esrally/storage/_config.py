@@ -17,10 +17,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import urllib.parse
 from typing import Any
 
-from esrally import config
-from esrally.utils import convert
+from esrally.utils import convert, executors
 
 LOG = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ RANDOM_SEED: Any = None
 RESOLVE_TTL: float = 60.0
 
 
-class StorageConfig(config.Config):
+class StorageConfig(executors.ExecutorsConfig):
 
     @property
     def adapters(self) -> tuple[str, ...]:
@@ -62,6 +63,13 @@ class StorageConfig(config.Config):
     @property
     def local_dir(self) -> str:
         return self.opts("storage", "storage.local_dir", LOCAL_DIR, False)
+
+    def local_path(self, path: str | None, url: str | None = None) -> str:
+        if path is None:
+            if url is None:
+                raise ValueError("Either path or url must be specified")
+            path = os.path.join(self.local_dir, urllib.parse.urlparse(url).path)
+        return os.path.normpath(os.path.expanduser(path))
 
     @property
     def max_connections(self) -> int:

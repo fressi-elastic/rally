@@ -257,6 +257,9 @@ class Range(RangeSet):
         return hash((self.start, self.end))
 
 
+MAX_RANGE: Final[Range] = Range(0, MAX_LENGTH)
+
+
 class RangeTree(RangeSet):
 
     def __init__(self, left: RangeSet, right: RangeSet):

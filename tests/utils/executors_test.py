@@ -63,22 +63,41 @@ def multiproc_actor_system(multiproc_system_base: str, process_startup_method: s
 
 @dataclasses.dataclass
 class ExecutorCase:
+    cls: type = executors.Executor
     use_threading: bool = False
     process_startup_method: str | None = None
-    want_same_pid: bool = True
+    want_same_pid: bool = False
     want_same_hostname: bool = True
     system_base: str | None = None
 
 
-def test_executor_threading():
-    _test_executor(ExecutorCase(use_threading=True))
+def test_thread_pool_executor():
+    _test_executor(ExecutorCase(cls=executors.ThreadPoolExecutor, want_same_pid=True))
 
 
-def test_simple_executor(simple_actor_system: actors.ActorSystem):
+def test_process_pool_executor():
+    _test_executor(ExecutorCase(cls=executors.ProcessPoolExecutor))
+
+
+def test_local_thread_pool_executor():
+    _test_executor(ExecutorCase(cls=executors.LocalThreadPoolExecutor))
+
+
+def test_executor_use_threading(process_startup_method: str | None):
+    _test_executor(
+        ExecutorCase(
+            use_threading=True,
+            process_startup_method=process_startup_method,
+            want_same_pid=(process_startup_method in ["spawn", "forkserver"]),
+        )
+    )
+
+
+def test_executor_simple(simple_actor_system: actors.ActorSystem):
     _test_executor(ExecutorCase(want_same_pid=False))
 
 
-def test_multiproc_executor(multiproc_actor_system: actors.ActorSystem, multiproc_system_base: str, process_startup_method: str | None):
+def test_executor_multiproc(multiproc_actor_system: actors.ActorSystem, multiproc_system_base: str, process_startup_method: str | None):
     _test_executor(ExecutorCase(want_same_pid=False, system_base=multiproc_system_base, process_startup_method=process_startup_method))
 
 
@@ -89,19 +108,26 @@ def _test_executor(case: ExecutorCase) -> None:
     cfg.add(config.Scope.application, "actor", "actor.process.startup.method", case.process_startup_method or "")
     if case.system_base:
         cfg.add(config.Scope.application, "actor", "actor.system.base", case.system_base)
-    executor = executors.Executor.from_config(cfg)
+    executor = case.cls.from_config(cfg)
+    assert isinstance(executor, case.cls)
 
     got_hostname = executor.submit(socket.gethostname).result()
-    assert (got_hostname == socket.gethostname()) is case.want_same_hostname
+    assert (got_hostname == socket.gethostname()) is case.want_same_hostname, f"same hostname is not {case.want_same_hostname}"
 
     got_pid = executor.submit(get_pid).result()
-    assert (got_pid == get_pid()) is case.want_same_pid
+    assert (got_pid == get_pid()) is case.want_same_pid, f"same pid is not {case.want_same_pid}"
 
     executor.submit(log_some_message, "message logged from child").result()
+    with pytest.raises(IndexError):
+        executor.submit(raise_some_error, IndexError("some error")).result()
 
 
 def log_some_message(msg: str):
     LOG.info("%s (pid=%d)", msg, os.getpid())
+
+
+def raise_some_error(error: Exception):
+    raise error
 
 
 def get_pid():

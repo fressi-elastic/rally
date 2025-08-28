@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Iterator, Mapping, MutableMapping
 from datetime import datetime
 from typing import Any
 
@@ -29,7 +29,7 @@ from requests.structures import CaseInsensitiveDict
 from typing_extensions import Self
 
 from esrally import types
-from esrally.storage._adapter import Adapter, Head, ServiceUnavailableError, Writable
+from esrally.storage._adapter import Adapter, Head, ServiceUnavailableError
 from esrally.storage._config import DEFAULT_STORAGE_CONFIG, StorageConfig
 from esrally.storage._range import NO_RANGE, RangeSet, rangeset
 
@@ -77,22 +77,18 @@ class HTTPAdapter(Adapter):
             res.raise_for_status()
         return head_from_headers(url, res.headers)
 
-    def get(self, url: str, stream: Writable, want: Head | None = None) -> Head:
+    def get(self, url: str, want: Head | None = None) -> tuple[Head, Iterator[bytes]]:
         headers: MutableMapping[str, str] = CaseInsensitiveDict()
         head_to_headers(want, headers)
-        with self.session.get(url, stream=True, allow_redirects=True, headers=headers) as res:
-            if res.status_code == 503:
-                raise ServiceUnavailableError()
-            res.raise_for_status()
+        res = self.session.get(url, stream=True, allow_redirects=True, headers=headers)
+        if res.status_code == 503:
+            raise ServiceUnavailableError()
+        res.raise_for_status()
 
-            got = head_from_headers(url, res.headers)
-            if want is not None:
-                want.check(got)
-
-            for chunk in res.iter_content(self.chunk_size):
-                if chunk:
-                    stream.write(chunk)
-        return got
+        got = head_from_headers(url, res.headers)
+        if want is not None:
+            want.check(got)
+        return got, res.iter_content(self.chunk_size)
 
 
 _ACCEPT_RANGES_HEADER = "Accept-Ranges"

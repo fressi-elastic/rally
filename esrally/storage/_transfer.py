@@ -286,16 +286,20 @@ class Transfer:
                     want = Head(ranges=fd.ranges, content_length=fd.ranges.size, document_length=self._document_length, crc32c=self._crc32c)
                 else:
                     want = Head(content_length=self._document_length, crc32c=self._crc32c)
-                got = self.client.get(self.url, fd, want=want)
+                got, chunks = self.client.get(self.url, want=want)
+                for chunk in chunks:
+                    try:
+                        fd.write(chunk)
+                    except StreamClosedError as ex:
+                        LOG.info("transfer cancelled: %s: %s", self.url, ex)
+                        cancelled = True
+                        break
                 if got.document_length is not None:
                     # It checks the size of the file it downloaded the data from.
                     self.document_length = got.document_length
                 if got.crc32c is not None:
                     # It checks the crc32c check sum of the file it downloaded the data from.
                     self.crc32c = got.crc32c
-        except StreamClosedError as ex:
-            LOG.info("transfer cancelled: %s: %s", self.url, ex)
-            cancelled = True
         except ServiceUnavailableError as ex:
             # The client raised this error because the maximum number of client connections for each remote server
             # has been already established.
@@ -531,8 +535,14 @@ class FileDescriptor:
     def close(self):
         with self._lock:
             if self._fd is not None:
+                self._fd.flush()
                 self._fd.close()
             self._fd = None
+
+    @property
+    def done(self) -> Range:
+        with self._lock:
+            return Range(self.ranges.start, self.position)
 
     def __enter__(self):
         return self
@@ -570,6 +580,6 @@ class FileWriter(FileDescriptor):
                 raise RangeError(f"data size exceeds file range: {len(data)} > {size}", self.ranges)
 
     def flush(self):
-        with self._lock:
-            if self._fd is not None:
-                self._fd.flush()
+        fd = self._fd
+        if fd is not None:
+            fd.flush()

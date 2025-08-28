@@ -17,12 +17,14 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from concurrent import futures
+from typing import Any, TypeVar
 
 from typing_extensions import Self
 
 from esrally import types
-from esrally.storage._adapter import Adapter, Head, Writable
+from esrally.storage._adapter import Adapter, Head
 from esrally.storage._range import NO_RANGE, RangeSet
 from esrally.utils import executors
 
@@ -54,41 +56,54 @@ class DummyAdapter(Adapter):
         except KeyError:
             raise FileNotFoundError from None
 
-    def get(self, url: str, stream: Writable, want: Head | None = None) -> Head:
+    def get(self, url: str, want: Head | None = None) -> tuple[Head, Iterator[bytes]]:
         ranges: RangeSet = NO_RANGE
         if want is not None:
             ranges = want.ranges
             if len(ranges) > 1:
                 raise NotImplementedError("len(head.ranges) > 1")
         data = self.data[url]
+        document_length: int | None = None
         if ranges:
-            stream.write(data[ranges.start : ranges.end])
-            return Head(url, content_length=ranges.size, ranges=ranges, document_length=len(data))
+            document_length = len(data)
+            data = data[ranges.start : ranges.end]
+        return Head(url, content_length=len(data), ranges=ranges, document_length=document_length), iter([data])
 
-        stream.write(data)
-        return Head(url, content_length=len(data))
+
+R = TypeVar("R")
 
 
 class DummyExecutor(executors.Executor):
 
     def __init__(self):
-        self.tasks: list[tuple] | None = []
+        self.tasks: list[executors.Task] | None = []
 
-    def submit(self, fn, /, *args, **kwargs):
+    def submit(self, fn: Callable, /, *args: Any, **kwargs: Any) -> futures.Future[R]:
         """Submits a callable to be executed with the given arguments.
 
         Schedules the callable to be executed as fn(*args, **kwargs).
         """
         if self.tasks is None:
             raise RuntimeError("Executor already closed")
-        self.tasks.append((fn, args, kwargs))
+        future = futures.Future[R]()
+        task = executors.Task[R](fn, args, kwargs, future)
+        self.tasks.append(task)
+        return future
 
     def execute_tasks(self):
         if self.tasks is None:
             raise RuntimeError("Executor already closed")
         tasks, self.tasks = self.tasks, []
-        for fn, args, kwargs in tasks:
-            fn(*args, **kwargs)
+        for t in tasks:
+            t()
 
     def shutdown(self):
+        tasks, self.tasks = self.tasks, []
         self.tasks = None
+        if tasks is not None:
+            for t in tasks:
+                t.handler.cancel()
+
+    @property
+    def max_workers(self) -> int:
+        return 1000

@@ -16,13 +16,16 @@
 # under the License.
 from __future__ import annotations
 
+import dataclasses
 import functools
 import logging
 import os
 import socket
+import time
 import traceback
 import typing
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Generator
 from typing import Any
 
 from thespian import actors  # type: ignore[import-untyped]
@@ -46,16 +49,119 @@ class BenchmarkCancelled:
     """It indicates that the benchmark has been cancelled (by the user)."""
 
 
+class ActorConfig(config.Config):
+
+    @property
+    def system_base(self) -> SystemBase:
+        return self.opts("actor", "actor.system.base", default_value=SYSTEM_BASE, mandatory=False)
+
+    @property
+    def fallback_system_base(self) -> SystemBase:
+        return self.opts("actor", "actor.fallback.system.base", default_value=FALLBACK_SYSTEM_BASE, mandatory=False)
+
+    @property
+    def ip(self) -> str | None:
+        return self.opts("actor", "actor.ip", default_value=ACTOR_IP, mandatory=False) or None
+
+    @property
+    def admin_port(self) -> int | None:
+        return int(self.opts("actor", "actor.admin.port", default_value=ADMIN_PORT, mandatory=False)) or None
+
+    @property
+    def coordinator_ip(self) -> str | None:
+        return self.opts("actor", "actor.coordinator.ip", default_value=COORDINATOR_IP, mandatory=False).strip() or None
+
+    @property
+    def coordinator_port(self) -> int | None:
+        return int(self.opts("actor", "actor.coordinator.port", default_value=COORDINATOR_PORT, mandatory=False)) or None
+
+    @property
+    def process_startup_method(self) -> ProcessStartupMethod | None:
+        return self.opts("actor", "actor.process.startup.method", default_value="", mandatory=False).strip() or None
+
+
+HOSTNAME = socket.gethostname()
+
+
 class BaseActor(actors.ActorTypeDispatcher):
 
-    def __init__(self, *args: typing.Any, **kw: typing.Any):
-        super().__init__(*args, **kw)
+    config_class = ActorConfig
+
+    @classmethod
+    def from_config(cls, cfg: types.AnyConfig = None) -> actors.ActorAddress:
+        actor_system = system_from_config(cfg)
+        actor_address = actor_system.createActor(
+            actorClass=cls, targetActorRequirements=cls.target_actor_requirements(), globalName=cls.global_name()
+        )
+        if cfg is not None:
+            actor_system.tell(actor_address, cfg)
+        return actor_address
+
+    @classmethod
+    def target_actor_requirements(cls) -> dict[str, Any]:
+        return {}
+
+    @classmethod
+    def global_name(cls) -> str | None:
+        return None
+
+    # The method name is required by the actor framework
+    # noinspection PyPep8Naming
+    @classmethod
+    def actorSystemCapabilityCheck(cls, capabilities: dict[str, Any], requirements: dict[str, Any]) -> bool:
+        capabilities.setdefault("hostname", HOSTNAME)
+        for name, value in requirements.items():
+            current = capabilities.get(name)
+            if current != value:
+                # A single mismatch event is not a problem by itself as long as at least one actor system instance
+                # matches the requirements.
+                return False
+        return True
+
+    def __init__(self):
+        super().__init__()
+        self._cfg: ActorConfig | None = None
         log.post_configure_logging()
         console.set_assume_tty(assume_tty=False)
         cls = type(self)
-        self.actor_name = f"{cls.__module__}:{cls.__name__}"
-        self.logger = logging.getLogger(self.actor_name)
-        self.logger.debug("Initializing actor: pid=%d, name='%s'.", os.getpid(), self.actor_name)
+        self.logger = logging.getLogger(f"{cls.__module__}:{cls.__name__}")
+        self.logger.debug("Initializing actor (pid=%d): '%s'.", os.getpid(), self)
+
+    @property
+    def cfg(self) -> ActorConfig:
+        if self._cfg is None:
+            self._cfg = self.config_class.from_config()
+        return self._cfg
+
+    def receiveMsg_ActorConfig(self, msg: ActorConfig, sender: actors.ActorAddress) -> None:
+        self._cfg = msg
+        self.configure_actor(msg)
+
+    def configure_actor(self, cfg: ActorConfig) -> None:
+        self.logger.debug("Actor configuration received: %s.", cfg)
+
+    def receiveMsg_Request(self, request: Request, sender: actors.ActorAddress) -> None:
+        result: Any = None
+        self.send(sender, Started(request.uuid))
+        try:
+            result = self.receiveMessage(request.message, sender)
+        except Exception as ex:
+            LOG.exception("Failed processing request: %s", request)
+            self.send(sender, Error(request.uuid, ex))
+        finally:
+            self.send(sender, Done(request.uuid, result))
+
+    def receiveMsg_Response(self, response: Response, sender: actors.ActorAddress) -> None:
+        try:
+            result = response.result()
+        except Exception as ex:
+            self.receive_error(ex, sender)
+        else:
+            if result is not None:
+                self.receiveMessage(result, sender)
+
+    def receive_error(self, ex: Exception, sender: actors.ActorAddress) -> None:
+        self.logger.error("Received request error from '%s': '%s'", sender, ex)
 
     def receiveMsg_ActorExitRequest(self, msg: actors.ActorExitRequest, sender: actors.ActorAddress) -> None:
         self.logger.debug("Received exit request from '%s': %s", sender, msg)
@@ -63,8 +169,20 @@ class BaseActor(actors.ActorTypeDispatcher):
     def receiveMsg_ChildActorExited(self, msg: actors.ActorExitRequest, sender: actors.ActorAddress) -> None:
         self.logger.debug("Received child actor exited from '%s': %s", sender, msg)
 
-    def receiveUnrecognizedMessage(self, msg: actors.PoisonMessage, sender: actors.ActorAddress) -> None:
+    def receiveUnrecognizedMessage(self, msg: Any, sender: actors.ActorAddress) -> None:
         self.logger.warning("Received unrecognized message from '%s': %s", sender, msg)
+
+
+class LocalActor(BaseActor):
+    """Actor mixin class that ensures actors to be created only on the host where are is being required."""
+
+    @classmethod
+    def target_actor_requirements(cls) -> dict[str, Any]:
+        return {"hostname": HOSTNAME}
+
+    @classmethod
+    def global_name(cls) -> str | None:
+        return f"{cls.__module__}:{cls.__name__}@{HOSTNAME}"
 
 
 M = typing.TypeVar("M")
@@ -113,23 +231,11 @@ def no_retry() -> Callable[[ActorMessageHandler[M]], ActorMessageHandler[M]]:
 
 class RallyActor(BaseActor):
 
-    def __init__(self, *args: Any, **kw: Any):
-        super().__init__(*args, **kw)
+    def __init__(self):
+        super().__init__()
         self.children: list[actors.ActorAddress] = []
         self.received_responses: list[typing.Any] = []
         self.status = None
-
-    # The method name is required by the actor framework
-    # noinspection PyPep8Naming
-    @staticmethod
-    def actorSystemCapabilityCheck(capabilities, requirements):
-        for name, value in requirements.items():
-            current = capabilities.get(name, None)
-            if current != value:
-                # A single mismatch event is not a problem by itself as long as at least one actor system instance
-                # matches the requirements.
-                return False
-        return True
 
     def transition_when_all_children_responded(self, sender, msg, expected_status, new_status, transition):
         """
@@ -330,15 +436,6 @@ def bootstrap_actor_system(
     return actor_system
 
 
-def resolve(host: str, port: int | None = None, family: int = socket.AF_INET, proto: int = socket.IPPROTO_TCP) -> tuple[str, int | None]:
-    address_info: tuple[Any, Any, Any, Any, tuple[Any, ...]]
-    for address_info in socket.getaddrinfo(host, port=port or None, family=family, proto=proto):
-        address = address_info[4]
-        if len(address) == 2 and isinstance(address[0], str) and isinstance(address[1], int):
-            host, port = address
-    return host, port or None
-
-
 SYSTEM_BASE: SystemBase = "multiprocTCPBase"
 FALLBACK_SYSTEM_BASE: SystemBase = "multiprocQueueBase"
 ACTOR_IP = "127.0.0.1"
@@ -348,42 +445,123 @@ COORDINATOR_PORT = 0
 PROCESS_STARTUP_METHOD: ProcessStartupMethod | None = None
 
 
-class ActorConfig(config.Config):
-
-    @property
-    def system_base(self) -> SystemBase:
-        return self.opts("actor", "actor.system.base", default_value=SYSTEM_BASE, mandatory=False)
-
-    @property
-    def fallback_system_base(self) -> SystemBase:
-        return self.opts("actor", "actor.fallback.system.base", default_value=FALLBACK_SYSTEM_BASE, mandatory=False)
-
-    @property
-    def ip(self) -> str | None:
-        return self.opts("actor", "actor.ip", default_value=ACTOR_IP, mandatory=False) or None
-
-    @property
-    def admin_port(self) -> int | None:
-        return int(self.opts("actor", "actor.admin.port", default_value=ADMIN_PORT, mandatory=False)) or None
-
-    @property
-    def coordinator_ip(self) -> str | None:
-        return self.opts("actor", "actor.coordinator.ip", default_value=COORDINATOR_IP, mandatory=False).strip() or None
-
-    @property
-    def coordinator_port(self) -> int | None:
-        return int(self.opts("actor", "actor.coordinator.port", default_value=COORDINATOR_PORT, mandatory=False)) or None
-
-    @property
-    def process_startup_method(self) -> ProcessStartupMethod | None:
-        return self.opts("actor", "actor.process.startup.method", default_value="", mandatory=False).strip() or None
+class PoisonError(Exception):
+    pass
 
 
-def system_from_config(cfg: types.AnyConfig = None) -> actors.ActorSystem:
+class ActorSystem(actors.ActorSystem):
+
+    request_id: int = 0
+
+    def request(
+        self,
+        actorAddr: actors.ActorAddress,
+        msg: Any,
+        timeout: float | None = None,
+        retry_interval: float | None = None,
+        retry_errors: tuple[type[Exception], ...] = tuple(),
+    ) -> Generator[Any]:
+        """It rewrites thespian ActorSystem.ask method raising a TimeoutError when request execution times out.
+
+        This wraps ask method doing the following after running original implementation:
+            - It yields results sent back by the actor.
+            - It wraps the msg with a Request object to ensure
+                - target actor will send an Error message in case of an unhandled exception.
+                - target actor will finally return a Done message when finished handling the request.
+            - It raises timeout exception when request execution times out.
+            - It writes to log a warning for poison messages received.
+            - It finally raises the last Error received by the actor.
+
+        :param actorAddr: target actor address.
+        :param msg: request message.
+        :param timeout: optional timeout after which TimeoutError will be raised it the request is not executed before given deadline.
+        :return: The response message from target actor, or a timeout exception if request execution times out.
+        """
+        if isinstance(msg, Request):
+            request = msg
+        else:
+            request = Request(msg)
+
+        ask_deadline: float | None = time.monotonic()
+        if timeout is None:
+            final_deadline = None
+        else:
+            final_deadline = time.monotonic() + timeout
+
+        uuids: set[uuid.UUID] = set()
+        errors: list[Exception] = []
+        req_id: uuid.UUID | None = None
+        res_id: uuid.UUID | None = None
+        while True:
+            if ask_deadline is not None and ask_deadline <= time.monotonic():
+                if final_deadline is not None:
+                    timeout = final_deadline - time.monotonic()
+                request.uuid = req_id = uuid.uuid4()
+                uuids.add(req_id)
+                response = super().ask(actorAddr, request, timeout=timeout)
+                ask_deadline = None
+            else:
+                deadlines = [d for d in [ask_deadline, final_deadline] if d is not None]
+                if deadlines:
+                    timeout = min(deadlines) - time.monotonic()
+                else:
+                    timeout = None
+                response = super().listen(timeout=timeout)
+
+            result = None
+            if isinstance(response, Response):
+                res_id = response.uuid or res_id
+                try:
+                    r = response.result(timeout=timeout)
+                except Exception as e:
+                    if not isinstance(e, retry_errors):
+                        retry_interval = None
+                    if res_id in uuids:
+                        errors.append(e)
+                    else:
+                        LOG.warning("Ignored error raised by actor (req_id: '%s'): '%s'", res_id, e)
+                else:
+                    result = r
+                if isinstance(response, Done):
+                    if res_id == req_id:
+                        if retry_interval is None:
+                            break
+                        ask_deadline = time.monotonic() + retry_interval
+                    if res_id in uuids:
+                        uuids.remove(res_id)
+            elif isinstance(response, actors.PoisonMessage):
+                LOG.warning("Ignored poison message: '%s'", response.details)
+            elif response is not None:
+                result = response
+
+            if result is not None:
+                if res_id in uuids:
+                    yield result
+                else:
+                    LOG.warning("Ignored result returned by actor (req_id: '%s'): '%r'", res_id, result)
+
+            if final_deadline is not None:
+                timeout = final_deadline - time.monotonic()
+                if timeout < 0:
+                    errors.append(TimeoutError(f"Timed out while asking '{actorAddr}' for '{msg}'"))
+                    break
+
+        if errors:
+            # Write to log all errors except the last one, and then it raises it.
+            last_error = errors.pop()
+            for error in errors:
+                LOG.warning("Ignored error raised by actor (request uuid: '%s'): '%s'", request.uuid, error)
+            raise last_error
+
+
+def system_from_config(cfg: types.AnyConfig = None) -> ActorSystem:
     cfg = ActorConfig.from_config(cfg)
-
     first_error: Exception | None = None
-    for sb in [cfg.system_base, cfg.fallback_system_base]:
+    system_bases = [cfg.system_base]
+    if cfg.fallback_system_base and cfg.fallback_system_base != cfg.system_base:
+        system_bases.append(cfg.fallback_system_base)
+
+    for sb in system_bases:
         try:
             return system(
                 system_base=sb,
@@ -394,7 +572,7 @@ def system_from_config(cfg: types.AnyConfig = None) -> actors.ActorSystem:
                 process_startup_method=cfg.process_startup_method,
             )
         except actors.ActorSystemException as ex:
-            LOG.debug("Failed setting up actor system with system base '%s'", sb, exc_info=True)
+            LOG.exception("Failed setting up actor system with system base '%s'", sb)
             first_error = first_error or ex
     raise first_error or Exception(f"Could not initialize actor system with system base '{cfg.system_base}'")
 
@@ -406,7 +584,7 @@ def system(
     coordinator_ip: str | None = None,
     coordinator_port: int | None = None,
     process_startup_method: str | None = None,
-) -> actors.ActorSystem:
+) -> ActorSystem:
     if system_base and system_base not in typing.get_args(SystemBase):
         raise ValueError(f"invalid system base value: '{system_base}', valid options are: {typing.get_args(SystemBase)}")
 
@@ -440,4 +618,69 @@ def system(
             capabilities["Process Startup Method"] = process_startup_method
         log_defs = log.load_configuration()
 
-    return actors.ActorSystem(systemBase=system_base, capabilities=capabilities, logDefs=log_defs)
+    return ActorSystem(systemBase=system_base, capabilities=capabilities, logDefs=log_defs)
+
+
+def resolve(host: str, port: int | None = None, family: int = socket.AF_INET, proto: int = socket.IPPROTO_TCP) -> tuple[str, int | None]:
+    address_info: tuple[Any, Any, Any, Any, tuple[Any, ...]]
+    for address_info in socket.getaddrinfo(host, port=port or None, family=family, proto=proto):
+        address = address_info[4]
+        if len(address) == 2 and isinstance(address[0], str) and isinstance(address[1], int):
+            host, port = address
+    return host, port or None
+
+
+@dataclasses.dataclass
+class Request:
+    # payload message carried by the request.
+    message: Any
+    # uuid is used to match a request with its responses.
+    uuid: uuid.UUID | None = None
+
+
+@dataclasses.dataclass
+class Response:
+    """Response is a message sent by actor when processing a request."""
+
+    # uuid is used to match a request with its responses.
+    uuid: uuid.UUID | None = None
+
+    def result(self, timeout: float | None = None) -> Any:
+        """It returns the result of the request or raises an exception.
+        :param timeout: timeout in seconds to wait for the response (in case it is not ready)
+        :return:
+        """
+        return None
+
+
+class Started(Response):
+    """Started is a Response send by actor just before starting processing request."""
+
+
+@dataclasses.dataclass
+class Result(Response):
+    """Result is a Response send by the actor to deliver a result to the requester."""
+
+    # res is the result value carried by this response
+    res: Any = None
+
+    def result(self, timeout: float | None = None) -> Any:
+        """It returns the carried result."""
+        return self.res
+
+
+@dataclasses.dataclass
+class Error(Response):
+    """Error is a Response send by the actor to raise an exception in the requester."""
+
+    # err is the exception value carried by this response
+    err: Exception | None = None
+
+    def result(self, timeout: float | None = None) -> None:
+        """It raises the carried error."""
+        if self.err:
+            raise self.err
+
+
+class Done(Result):
+    """Done is a Response send by the actor to just after processing request."""

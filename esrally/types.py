@@ -29,7 +29,6 @@ Section = Literal[
     "driver",
     "executors",
     "generator",
-    "log",
     "mechanic",
     "meta",
     "no_copy",

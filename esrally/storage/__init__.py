@@ -16,8 +16,4 @@
 # under the License.
 from esrally.storage._adapter import Adapter, AdapterRegistry, Head
 from esrally.storage._config import StorageConfig
-from esrally.storage._manager import (
-    TransferManager,
-    shutdown_transfer_manager,
-    transfer_manager,
-)
+from esrally.storage._manager import TransferManager, TransferStatus

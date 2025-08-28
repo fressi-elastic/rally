@@ -19,13 +19,13 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import call, create_autospec
+from unittest.mock import create_autospec
 
 import boto3
 import pytest
 
 from esrally.config import Scope
-from esrally.storage._adapter import Head, Writable
+from esrally.storage._adapter import Head
 from esrally.storage._aws import S3Adapter, S3Client, head_from_response
 from esrally.storage._config import DEFAULT_STORAGE_CONFIG, StorageConfig
 from esrally.storage._range import rangeset
@@ -97,14 +97,14 @@ class GetCase:
     want_bucket: str = SOME_BUCKET
     want_key: str = SOME_KEY
     want_range: str = ""
-    want_write_data: Iterable[bytes] = tuple()
+    want_data: Iterable[bytes] = tuple()
 
 
 @cases(
     empty=GetCase({}, Head(SOME_URL)),
     accept_ranges=GetCase(ACCEPT_RANGES_HEADERS, Head(SOME_URL, accept_ranges=True)),
     content_length=GetCase(CONTENT_LENGTH_HEADERS, Head(SOME_URL, content_length=512)),
-    read_data=GetCase(SOME_DATA_HEADERS, Head(SOME_URL, content_length=len(SOME_DATA)), want_write_data=[SOME_DATA]),
+    read_data=GetCase(SOME_DATA_HEADERS, Head(SOME_URL, content_length=len(SOME_DATA)), want_data=[SOME_DATA]),
     ranges=GetCase(
         CONTENT_RANGE_HEADERS,
         Head(SOME_URL, content_length=18, ranges=rangeset("3-20"), document_length=128),
@@ -116,14 +116,13 @@ def test_get(case: GetCase, s3_client) -> None:
     case.response.setdefault("Body", DummyBody(b""))
     s3_client.get_object.return_value = case.response
     adapter = S3Adapter(s3_client=s3_client)
-    stream = create_autospec(Writable, spec_set=True, instance=True)
-    head = adapter.get(case.url, stream, want=Head(content_length=case.content_length, ranges=rangeset(case.ranges)))
+    head, data = adapter.get(case.url, want=Head(content_length=case.content_length, ranges=rangeset(case.ranges)))
     assert head == case.want
     kwargs = {}
     if case.want_range:
         kwargs["Range"] = f"bytes={case.ranges}"
     s3_client.get_object.assert_called_once_with(Bucket=case.want_bucket, Key=case.want_key, **kwargs)
-    assert [call(data) for data in case.want_write_data] == stream.write.mock_calls
+    assert list(data) == list(case.want_data)
 
 
 @dataclass()

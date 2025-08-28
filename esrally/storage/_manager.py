@@ -16,60 +16,108 @@
 # under the License.
 from __future__ import annotations
 
-import atexit
+import dataclasses
+import datetime
 import logging
 import os
-import threading
 
+from thespian import actors  # type: ignore[import-untyped]
 from typing_extensions import Self
 
-from esrally import types
+from esrally import actor, types
+from esrally.actor import ActorConfig
 from esrally.storage._client import Client
 from esrally.storage._config import StorageConfig
 from esrally.storage._transfer import Transfer
-from esrally.utils import executors, threads
+from esrally.utils import convert, executors
 
 LOG = logging.getLogger(__name__)
 
 
+@dataclasses.dataclass
+class Get:
+    url: str
+    path: str | None = None
+    expected_size: int | None = None
+
+
+@dataclasses.dataclass
 class TransferManager:
-    """It creates and perform file transfer operations in background."""
+    actor: actors.ActorAddress
 
     @classmethod
     def from_config(cls, cfg: types.AnyConfig = None) -> Self:
         """It creates a TransferManager with initialization values taken from given configuration."""
+        cfg = StorageConfig.from_config(cfg)
+        return cls(actor=StorageActor.from_config(cfg))
 
-        return cls(
-            cfg=StorageConfig.from_config(cfg),
-            client=Client.from_config(cfg),
-            executor=executors.Executor.from_config(cfg),
-        )
+    def get(
+        self, url: str, path: str | None = None, expected_size: int | None = None, timeout: float | None = None, wait: bool = False
+    ) -> TransferStatus:
+        """It starts a new transfer of a file from a remote url to a local path.
 
-    def __init__(
-        self,
-        cfg: StorageConfig,
-        client: Client,
-        executor: executors.Executor,
-    ):
+        :param url: remote file address.
+        :param path: local file address.
+        :param expected_size: the expected file size in bytes.
+        :param wait: if True it waits until the transfer completes before returning.
+        :param timeout: timeout in seconds.
+        :return: transfer status object.
+        """
+        s = actor.system()
+        while True:
+            for status in s.request(self.actor, Get(url=url, path=path, expected_size=expected_size), timeout=timeout, retry_interval=0.1):
+                if status.finished or not wait:
+                    return status
+
+    def shutdown(self):
+        return actor.system().ask(self.actor, actors.ActorExitRequest())
+
+
+@dataclasses.dataclass
+class TransferStatus:
+    url: str
+    path: str
+    finished: bool = False
+    size: int | None = None
+    transferred: int | None = None
+    duration: convert.Duration = convert.Duration(0)
+    progress: float | None = None
+    average_speed: float | None = None
+
+
+class StorageActor(actor.LocalActor):
+
+    config_class = StorageConfig
+
+    def __init__(self):
         """It manages files transfers.
 
         It executes file transfers in background. It periodically logs the status of transfers that are in progress.
-        :param cfg: Configuration object.
-        :param client: _client.Client instance used to allocate/reuse storage adapters.
-        :param executor: Executor instance used to execute transfer operations.
         """
-        self.cfg = cfg
-        self._client = client
-        self._executor = executor
-        self._lock = threading.Lock()
+        super().__init__()
+        self._client: Client | None = None
+        self._executor: executors.Executor | None = None
+        self.transfers: dict[str, Transfer] = {}
+        self.timer_id: int = 0
 
-        local_dir = os.path.expanduser(cfg.local_dir)
-        if not os.path.isdir(local_dir):
-            os.makedirs(local_dir)
-        self._local_dir = local_dir
+    @property
+    def cfg(self) -> StorageConfig:
+        return StorageConfig.from_config(super().cfg)
 
-        self._transfers: list[Transfer] = []
+    @property
+    def client(self) -> Client:
+        if self._client is None:
+            self._client = Client.from_config(self.cfg)
+        return self._client
 
+    @property
+    def executor(self) -> executors.Executor:
+        if self._executor is None:
+            self._executor = executors.ThreadPoolExecutor.from_config(self.cfg)
+        return self._executor
+
+    def configure_actor(self, cfg: ActorConfig) -> None:
+        cfg = StorageConfig.from_config(cfg)
         if cfg.max_connections < 1:
             raise ValueError(f"invalid max_connections: {cfg.max_connections} < 1")
 
@@ -78,81 +126,51 @@ class TransferManager:
 
         if cfg.monitor_interval <= 0:
             raise ValueError(f"invalid monitor interval: {cfg.monitor_interval} <= 0")
-        self._monitor_timer = threads.ContinuousTimer(
-            interval=cfg.monitor_interval, function=self.monitor, name="esrally.storage.transfer-monitor"
-        )
-        self._monitor_timer.start()
+
+        local_dir = os.path.expanduser(cfg.local_dir)
+        if not os.path.isdir(local_dir):
+            os.makedirs(local_dir)
+        self.start_timer(cfg.monitor_interval)
+
+    def receiveMsg_ActorExitRequest(self, msg: actors.ActorExitRequest, sender: actors.ActorAddress) -> None:
+        self.shutdown()
+        return self.SUPER
 
     def shutdown(self):
-        with self._lock:
-            transfers = self._transfers
-            self._transfers = []
-        for tr in transfers:
+        self.stop_timer()
+        transfers, self.transfers = self.transfers, {}
+        for tr in transfers.values():
             try:
                 tr.close()
             except Exception as ex:
                 LOG.error("error closing transfer: %s, %s", tr.url, ex)
-        self._monitor_timer.cancel()
 
-    def get(self, url: str, path: os.PathLike | str | None = None, document_length: int | None = None) -> Transfer:
-        """It starts a new transfer of a file from a remote url to a local path.
+    def start_timer(self, interval: float) -> None:
+        self.timer_id += 1
+        self.wakeupAfter(timePeriod=datetime.timedelta(seconds=0), payload=(self.timer_id, interval))
 
-        :param url: remote file address.
-        :param path: local file address.
-        :param document_length: the expected file size in bytes.
-        :return: started transfer object.
-        """
-        if path is None:
-            path = os.path.join(self.cfg.local_dir, url)
-        # This also ensures the path is a string
-        path = os.path.normpath(os.path.expanduser(path))
+    def stop_timer(self) -> None:
+        self.timer_id = 0  # cancel timer
 
-        head = self._client.head(url)
-        if document_length is not None and head.content_length != document_length:
-            raise ValueError(f"mismatching document_length: got {head.content_length} bytes, wanted {document_length} bytes")
-        tr = Transfer(
-            client=self._client,
-            url=url,
-            path=path,
-            document_length=head.content_length,
-            executor=self._executor,
-            multipart_size=self.cfg.multipart_size,
-            crc32c=head.crc32c,
-        )
+    def receiveMsg_WakeupMessage(self, msg: actors.WakeupMessage, sender: actors.ActorAddress) -> None:
+        timer_id, interval = msg.payload
+        if timer_id != self.timer_id:
+            return self.SUPER
+        self.update_transfers()
+        if self.client is not None:
+            self.client.monitor()
+        self.wakeupAfter(timePeriod=datetime.timedelta(seconds=interval), payload=msg.payload)
 
-        # It sets the actual value for `max_connections` after updating the number of unfinished transfers and before
-        # requesting for the first worker threads. In this way it will avoid requesting more worker threads than
-        # the allowed per-transfer connections.
-        with self._lock:
-            self._transfers.append(tr)
-        self._update_transfers()
-        tr.start()
-        return tr
-
-    def monitor(self):
-        self._update_transfers()
-        self._client.monitor()
-
-    @property
-    def max_connections(self) -> int:
-        with self._lock:
-            max_connections = self.cfg.max_connections
-            number_of_transfers = len(self._transfers)
-            if number_of_transfers > 0:
-                max_connections = min(max_connections, (self._executor.max_workers // number_of_transfers) + 1)
-        return max_connections
-
-    def _update_transfers(self) -> None:
+    def update_transfers(self) -> None:
         """It executes periodic update operations on every unfinished transfer."""
-        with self._lock:
-            # It first removes finished transfers.
-            self._transfers = transfers = [tr for tr in self._transfers if not tr.finished]
-            if not transfers:
-                return
+        # It first removes finished transfers.
+        self.transfers = transfers = {path: tr for path, tr in self.transfers.items() if not tr.finished}
+        if not transfers:
+            return
 
         # It updates max_connections value for each transfer
         max_connections = self.max_connections
-        for tr in transfers:
+        for tr in transfers.values():
             # It updates the limit of the number of connections for every transfer because it varies in function of
             # the number of transfers in progress.
             tr.max_connections = max_connections
@@ -164,46 +182,63 @@ class TransferManager:
             tr.start()
 
         # It logs updated statistics for every transfer.
-        LOG.info("Transfers in progress:\n  %s", "\n  ".join(tr.info() for tr in transfers))
+        LOG.info("Transfers in progress:\n  %s", "\n  ".join(tr.info() for tr in transfers.values()))
 
+    def receiveMsg_Get(self, request: Get, sender: actors.ActorAddress) -> None:
+        """It starts a new transfer of a file from a remote url to a local path.
 
-def config_and_name(cfg: types.AnyConfig = None) -> tuple[types.AnyConfig, str | None]:
-    if cfg is None:
-        return None, None
-    if isinstance(cfg, str):
-        cfg = cfg.strip() or None
-        return cfg, cfg
-    cfg = StorageConfig.from_config(cfg)
-    return cfg, cfg.name
+        :param request: it carries transfer parameters.
+        :param sender: sender actor address.
+        :return: transfer status object.
+        """
+        cfg = StorageConfig.from_config(self.cfg)
+        path = request.path
+        url = request.url
+        if path is None:
+            path = os.path.join(cfg.local_dir, url)
+        # This also ensures the path is a string
+        path = os.path.normpath(os.path.expanduser(path))
+        transfer = self.transfers.get(path)
+        if transfer is None:
+            head = self.client.head(url)
+            if request.expected_size is not None and head.content_length != request.expected_size:
+                raise ValueError(f"mismatching document_length: got {head.content_length} bytes, wanted {request.expected_size} bytes")
+            transfer = Transfer(
+                client=self.client,
+                url=url,
+                path=path,
+                document_length=head.content_length,
+                executor=self.executor,
+                multipart_size=self.cfg.multipart_size,
+                crc32c=head.crc32c,
+            )
+            if not transfer.finished:
+                self.transfers[transfer.path] = transfer
+                # It sets the actual value for `max_connections` after updating the number of unfinished transfers and before
+                # requesting for the first worker threads. In this way it will avoid requesting more worker threads than
+                # the allowed per-transfer connections.
+                transfer.start()
+                self.update_transfers()
 
+        for e in transfer.errors:
+            self.send(sender, actor.Error(err=e))
+        status = TransferStatus(
+            url=url,
+            path=path,
+            finished=transfer.finished,
+            size=transfer.document_length,
+            transferred=transfer.done.size,
+            duration=transfer.duration,
+            progress=transfer.progress,
+            average_speed=transfer.average_speed,
+        )
+        self.send(sender, actor.Result(res=status))
 
-_MANAGERS_LOCK = threading.Lock()
-_MANAGERS: dict[str | None, TransferManager] = {}
-
-
-def transfer_manager(cfg: types.AnyConfig = None) -> TransferManager:
-    with _MANAGERS_LOCK:
-        cfg, name = config_and_name(cfg)
-        manager = _MANAGERS.get(name)
-        if manager is None:
-            cfg = StorageConfig.from_config(cfg)
-            manager = TransferManager.from_config(cfg)
-            _MANAGERS[cfg.name] = manager
-            atexit.register(manager.shutdown)
-            LOG.debug("transfer manager initialized: cfg=%s", cfg)
-        elif (cfg := StorageConfig.from_config(cfg)) != manager.cfg:
-            manager.cfg = cfg
-            LOG.debug("transfer manager configuration updated: cfg=%s", cfg)
-        return manager
-
-
-def shutdown_transfer_manager(cfg: types.AnyConfig = None) -> bool:
-    with _MANAGERS_LOCK:
-        cfg, name = config_and_name(cfg)
-        manager = _MANAGERS.pop(name, None)
-        if manager is None:
-            LOG.debug("transfer manager not initialized: %s", name)
-            return False
-        LOG.debug("shutting down transfer manager: %s", name)
-        manager.shutdown()
-        return True
+    @property
+    def max_connections(self) -> int:
+        max_connections = self.cfg.max_connections
+        number_of_transfers = len(self.transfers)
+        if number_of_transfers > 0:
+            max_workers = max(1, self.executor.max_workers or 1)
+            max_connections = min(max_connections, (max_workers // number_of_transfers) + 1)
+        return max_connections

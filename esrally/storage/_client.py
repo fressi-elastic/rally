@@ -29,12 +29,7 @@ from typing import NamedTuple
 from typing_extensions import Self
 
 from esrally import types
-from esrally.storage._adapter import (
-    AdapterRegistry,
-    Head,
-    ServiceUnavailableError,
-    Writable,
-)
+from esrally.storage._adapter import AdapterRegistry, Head, ServiceUnavailableError
 from esrally.storage._config import DEFAULT_STORAGE_CONFIG, StorageConfig
 from esrally.storage._mirror import MirrorList
 from esrally.utils import pretty
@@ -204,11 +199,10 @@ class Client:
             else:
                 yield got
 
-    def get(self, url: str, stream: Writable, want: Head | None = None) -> Head:
+    def get(self, url: str, want: Head | None = None) -> tuple[Head, Iterator[bytes]]:
         """It downloads a remote bucket object to a local file path.
 
         :param url: the URL of the remote file.
-        :param stream: the destination file stream where to write data to.
         :param want: extra params for getting the file:
             - document_length: the document length of the file to transfer.
             - crc32c: the crc32c checksum of the file to transfer.
@@ -231,7 +225,7 @@ class Client:
                 LOG.debug("connection limit exceeded for url '%s'", url)
                 continue
             try:
-                return adapter.get(got.url, stream, want=want)
+                return adapter.get(got.url, want=want)
             except ServiceUnavailableError as ex:
                 LOG.warning("service unavailable error received: url='%s' %s", url, ex)
                 with self._lock:

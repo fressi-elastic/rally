@@ -20,15 +20,14 @@ import json
 import os
 import random
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from os import PathLike
-from unittest.mock import create_autospec
 
 import pytest
 
 from esrally.config import Config, Scope
-from esrally.storage._adapter import Head, Writable
+from esrally.storage._adapter import Head
 from esrally.storage._client import CachedHeadError, Client
 from esrally.storage._config import DEFAULT_STORAGE_CONFIG, StorageConfig
 from esrally.storage._range import NO_RANGE, RangeSet, rangeset
@@ -207,23 +206,23 @@ def test_resolve(case: ResolveCase, client: Client) -> None:
 @dataclass()
 class GetCase:
     url: str
-    want_any: list[Head]
+    want_any_head: list[Head]
     ranges: RangeSet = NO_RANGE
     document_length: int = None
-    want_data: bytes | None = None
+    want_data: Iterable[bytes] = (b"",)
 
 
 @cases(
     regular=GetCase(
         SOME_URL,
         [Head(url=SOME_URL, content_length=len(SOME_BODY), document_length=len(SOME_BODY))],
-        want_data=SOME_BODY,
+        want_data=[SOME_BODY],
     ),
     range=GetCase(
         SOME_URL,
         [Head(SOME_URL, content_length=30, accept_ranges=True, ranges=rangeset("0-29"), document_length=len(SOME_BODY))],
         ranges=rangeset("0-29"),
-        want_data=SOME_BODY,
+        want_data=[SOME_BODY],
     ),
     mirrors=GetCase(
         MIRRORING_URL,
@@ -231,18 +230,16 @@ class GetCase:
             MIRRORED_HEAD,
             MIRRORED_NO_RANGE_HEAD,
         ],
-        want_data=SOME_BODY,
+        want_data=[SOME_BODY],
     ),
 )
 def test_get(case: GetCase, client: Client) -> None:
-    stream = create_autospec(Writable, spec_set=True, instance=True)
-    got = client.get(case.url, stream, want=Head(ranges=case.ranges, document_length=case.document_length))
-    assert [] != check_any(got, case.want_any)
-    if case.want_data is not None:
-        stream.write.assert_called_once_with(case.want_data)
+    head, chunks = client.get(case.url, want=Head(ranges=case.ranges, document_length=case.document_length))
+    assert [] != check_any_head(head, case.want_any_head)
+    assert list(chunks) == list(case.want_data)
 
 
-def check_any(head: Head, any_head: list[Head]) -> list[Head]:
+def check_any_head(head: Head, any_head: list[Head]) -> list[Head]:
     ret: list[Head] = []
     for h in any_head:
         try:

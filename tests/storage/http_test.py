@@ -16,7 +16,7 @@
 # under the License.
 from __future__ import annotations
 
-import io
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import create_autospec
@@ -26,7 +26,7 @@ from requests import Response, Session
 from requests.structures import CaseInsensitiveDict
 
 from esrally.config import Config, Scope
-from esrally.storage._adapter import Head, Writable
+from esrally.storage._adapter import Head
 from esrally.storage._config import DEFAULT_STORAGE_CONFIG
 from esrally.storage._http import HTTPAdapter, head_from_headers, ranges_to_headers
 from esrally.storage._range import rangeset
@@ -51,10 +51,11 @@ def session() -> Session:
 def response(
     headers: dict[str, str] | None = None,
     status_code: int = 200,
-    data: str = "",
+    data: bytes = b"",
 ):
     res = Response()
-    res.raw = io.StringIO(data)
+    res.iter_content = lambda size: iter([data])
+    res.close = lambda: None
     res.status_code = status_code
     res.headers = CaseInsensitiveDict()
     if headers is not None:
@@ -93,7 +94,7 @@ class GetCase:
     want: Head
     url: str = URL
     ranges: str = ""
-    want_data: str = ""
+    want_data: Iterable[bytes] = (b"",)
     want_request_range: str = ""
 
 
@@ -101,7 +102,7 @@ class GetCase:
     default=GetCase(response(), Head(URL)),
     accept_ranges=GetCase(response(ACCEPT_RANGES_HEADER), Head(URL, accept_ranges=True)),
     content_length=GetCase(response(CONTENT_LENGTH_HEADER), Head(URL, content_length=512)),
-    read_data=GetCase(response(data="some_data"), Head(URL), want_data="some_data"),
+    read_data=GetCase(response(data=b"some_data"), Head(URL), want_data=[b"some_data"]),
     ranges=GetCase(
         response(CONTENT_RANGE_HEADER),
         Head(URL, content_length=18, ranges=rangeset("3-20"), document_length=128),
@@ -114,13 +115,10 @@ class GetCase:
 def test_get(case: GetCase, session: Session) -> None:
     adapter = HTTPAdapter(session=session)
     session.get.return_value = case.response
-    stream = create_autospec(Writable, spec_set=True, instance=True)
-    head = adapter.get(case.url, stream, want=Head(ranges=rangeset(case.ranges)))
+    head, chunks = adapter.get(case.url, want=Head(ranges=rangeset(case.ranges)))
+    data = list(chunks)
     assert head == case.want
-    if case.want_data:
-        stream.write.assert_called_once_with(case.want_data)
-    else:
-        assert not stream.write.called
+    assert data == list(case.want_data)
     want_request_headers = {}
     if case.want_request_range:
         want_request_headers["range"] = case.want_request_range

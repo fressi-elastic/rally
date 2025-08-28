@@ -20,8 +20,7 @@ import datetime
 import importlib
 import logging
 import threading
-from abc import ABC, abstractmethod
-from collections.abc import Container
+from collections.abc import Container, Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -36,13 +35,6 @@ LOG = logging.getLogger(__name__)
 
 class ServiceUnavailableError(Exception):
     """It is raised when an adapter refuses providing service for example because of too many requests"""
-
-
-@runtime_checkable
-class Writable(Protocol):
-
-    def write(self, data: bytes) -> None:
-        pass
 
 
 _HEAD_CHECK_IGNORE = frozenset(["url"])
@@ -74,16 +66,15 @@ def _all_specified(*objs: Any) -> bool:
     return all(o or o is False for o in objs)
 
 
-class Adapter(ABC):
+@runtime_checkable
+class Adapter(Protocol):
     """Base class for storage class client implementation"""
 
     @classmethod
-    @abstractmethod
     def match_url(cls, url: str) -> bool:
         """It returns a canonical URL in case this adapter accepts the URL, None otherwise."""
 
     @classmethod
-    @abstractmethod
     def from_config(cls, cfg: types.AnyConfig) -> Self:
         """Default `Adapter` objects factory method used to create adapters from `esrally` client.
 
@@ -94,19 +85,16 @@ class Adapter(ABC):
         :return: an adapter object.
         """
 
-    @abstractmethod
     def head(self, url: str) -> Head:
         """It gets remote file headers.
         :return: the Head of the remote file.
         :raises ServiceUnavailableError: in case on temporary service failure.
         """
 
-    @abstractmethod
-    def get(self, url: str, stream: Writable, want: Head | None = None) -> Head:
+    def get(self, url: str, want: Head | None = None) -> tuple[Head, Iterator[bytes]]:
         """It downloads a remote bucket object to a local file path.
 
         :param url: it represents the URL of the remote file object.
-        :param stream: it represents the local file stream where to write data to.
         :param want: it allows to specify optional parameters:
             - range: portion of the file to transfer (it must be empty or a continuous range).
             - content_length: the number of bytes to transfer.
