@@ -530,15 +530,15 @@ class Downloader:
         use_transfer_manager: bool = convert.to_bool(
             cfg.opts("track", "track.downloader.multipart_enabled", mandatory=False, default_value=False)
         )
-        storage_config: storage.StorageConfig | None = None
+        transfer_manager = None
         if use_transfer_manager:
-            storage_config = storage.StorageConfig.from_config(cfg)
-        return cls(offline=offline, test_mode=test_mode, storage_config=storage_config)
+            transfer_manager = storage.TransferManager.from_config(cfg)
+        return cls(offline=offline, test_mode=test_mode, transfer_manager=transfer_manager)
 
-    def __init__(self, offline: bool, test_mode: bool, storage_config: storage.StorageConfig | None = None):
+    def __init__(self, offline: bool, test_mode: bool, transfer_manager: storage.TransferManager | None = None):
         self.offline = offline
         self.test_mode = test_mode
-        self.storage_config = storage_config
+        self.transfer_manager = transfer_manager
 
     def download(self, base_url: str, target_path: str, size_in_bytes: int | None = None) -> None:
         file_name = os.path.basename(target_path)
@@ -549,11 +549,10 @@ class Downloader:
 
         # It joins manually as `urllib.parse.urljoin` does not work with S3 or GS URL schemes.
         data_url = f"{base_url.rstrip('/')}/{file_name}"
-        if self.storage_config is not None:
-            manager = storage.transfer_manager(self.storage_config)
+        if self.transfer_manager is not None:
             LOG.info("Downloading data from [%s] to [%s] using transfer manager...", data_url, target_path)
             try:
-                manager.get(data_url, target_path, size_in_bytes).wait()
+                self.transfer_manager.get(url=data_url, path=target_path, expected_size=size_in_bytes, wait=True)
                 LOG.info("Downloaded data from [%s] to [%s] using transfer manager.", data_url, target_path)
                 return
             except FileNotFoundError as ex:

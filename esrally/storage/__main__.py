@@ -22,7 +22,7 @@ import sys
 import time
 
 from esrally import actor
-from esrally.storage import TransferManager, TransferStatus
+from esrally.storage import StorageConfig, TransferManager, TransferStatus
 
 LOG = logging.getLogger("esrally.storage")
 
@@ -33,8 +33,9 @@ def main():
     if not urls:
         sys.stderr.write(f"usage: python3 '{sys.argv[0]}' <url> [urls]\n")
         raise sys.exit(1)
-    atexit.register(actor.system().shutdown)
-    manager = TransferManager.from_config()
+    cfg = StorageConfig.from_config()
+    atexit.register(actor.ActorSystem.from_config(cfg).shutdown)
+    manager = TransferManager.from_config(cfg)
     all: dict[str, TransferStatus | None] = {url: None for url in urls}
     try:
         unfinished = set(all)

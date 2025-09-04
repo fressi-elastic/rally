@@ -29,6 +29,9 @@ from collections.abc import Callable, Generator
 from typing import Any
 
 from thespian import actors  # type: ignore[import-untyped]
+from thespian.system.logdirector import (  # type: ignore[import-untyped]
+    ThespianLogForwarder,
+)
 from typing_extensions import TypeAlias
 
 from esrally import config, exceptions, log, types
@@ -89,7 +92,7 @@ class BaseActor(actors.ActorTypeDispatcher):
 
     @classmethod
     def from_config(cls, cfg: types.AnyConfig = None) -> actors.ActorAddress:
-        actor_system = system_from_config(cfg)
+        actor_system = ActorSystem.from_config(cfg)
         actor_address = actor_system.createActor(
             actorClass=cls, targetActorRequirements=cls.target_actor_requirements(), globalName=cls.global_name()
         )
@@ -130,7 +133,8 @@ class BaseActor(actors.ActorTypeDispatcher):
     @property
     def cfg(self) -> ActorConfig:
         if self._cfg is None:
-            self._cfg = self.config_class.from_config()
+            self.cfg = self.config_class.from_config()
+        assert isinstance(self._cfg, ActorConfig)
         return self._cfg
 
     @cfg.setter
@@ -456,6 +460,75 @@ class PoisonError(Exception):
 
 class ActorSystem(actors.ActorSystem):
 
+    @classmethod
+    def from_config(cls, cfg: types.AnyConfig = None) -> ActorSystem:
+        cfg = ActorConfig.from_config(cfg)
+        first_error: Exception | None = None
+        system_bases = [cfg.system_base]
+        if cfg.fallback_system_base and cfg.fallback_system_base != cfg.system_base:
+            system_bases.append(cfg.fallback_system_base)
+
+        for sb in system_bases:
+            try:
+                return cls.create(
+                    system_base=sb,
+                    ip=cfg.ip,
+                    admin_port=cfg.admin_port,
+                    coordinator_ip=cfg.coordinator_ip,
+                    coordinator_port=cfg.coordinator_port,
+                    process_startup_method=cfg.process_startup_method,
+                )
+            except actors.ActorSystemException as ex:
+                LOG.exception("Failed setting up actor system with system base '%s'", sb)
+                first_error = first_error or ex
+        raise first_error or Exception(f"Could not initialize actor system with system base '{cfg.system_base}'")
+
+    @classmethod
+    def create(
+        cls,
+        system_base: SystemBase | None = None,
+        ip: str | None = None,
+        admin_port: int | None = None,
+        coordinator_ip: str | None = None,
+        coordinator_port: int | None = None,
+        process_startup_method: str | None = None,
+    ) -> ActorSystem:
+        if system_base and system_base not in typing.get_args(SystemBase):
+            raise ValueError(f"invalid system base value: '{system_base}', valid options are: {typing.get_args(SystemBase)}")
+
+        capabilities: dict[str, Any] = {"coordinator": True}
+        if system_base in ("multiprocTCPBase", "multiprocUDPBase"):
+            if ip:
+                ip, admin_port = resolve(ip, admin_port)
+                capabilities["ip"] = ip
+
+            if admin_port:
+                capabilities["Admin Port"] = admin_port
+
+            if coordinator_ip:
+                coordinator_ip, coordinator_port = resolve(coordinator_ip, coordinator_port)
+                if coordinator_port:
+                    coordinator_port = int(coordinator_port)
+                    if coordinator_port:
+                        coordinator_ip += f":{coordinator_port}"
+                capabilities["Convention Address.IPv4"] = coordinator_ip
+                if ip and coordinator_ip != ip:
+                    capabilities["coordinator"] = False
+
+        if system_base != "simpleSystemBase":
+            if process_startup_method:
+                if process_startup_method not in typing.get_args(ProcessStartupMethod):
+                    raise ValueError(
+                        f"invalid process startup method value: '{process_startup_method}', valid options are: "
+                        f"{typing.get_args(ProcessStartupMethod)}"
+                    )
+                capabilities["Process Startup Method"] = process_startup_method
+
+        log_defs = False
+        if not isinstance(logging.root, ThespianLogForwarder):
+            log_defs = log.load_configuration()
+        return ActorSystem(systemBase=system_base, capabilities=capabilities, logDefs=log_defs)
+
     request_id: int = 0
 
     def request(
@@ -504,7 +577,10 @@ class ActorSystem(actors.ActorSystem):
                 request.uuid = req_id = uuid.uuid4()
                 uuids.add(req_id)
                 response = super().ask(actorAddr, request, timeout=timeout)
-                ask_deadline = None
+                if retry_interval is None:
+                    ask_deadline = None
+                else:
+                    ask_deadline = time.monotonic() + retry_interval
             else:
                 deadlines = [d for d in [ask_deadline, final_deadline] if d is not None]
                 if deadlines:
@@ -519,10 +595,10 @@ class ActorSystem(actors.ActorSystem):
                 try:
                     r = response.result(timeout=timeout)
                 except Exception as e:
-                    if not isinstance(e, retry_errors):
-                        retry_interval = None
                     if res_id in uuids:
                         errors.append(e)
+                        if not isinstance(e, retry_errors):
+                            retry_interval = None
                     else:
                         LOG.warning("Ignored error raised by actor (req_id: '%s'): '%s'", res_id, e)
                 else:
@@ -531,7 +607,6 @@ class ActorSystem(actors.ActorSystem):
                     if res_id == req_id:
                         if retry_interval is None:
                             break
-                        ask_deadline = time.monotonic() + retry_interval
                     if res_id in uuids:
                         uuids.remove(res_id)
             elif isinstance(response, actors.PoisonMessage):
@@ -557,73 +632,6 @@ class ActorSystem(actors.ActorSystem):
             for error in errors:
                 LOG.warning("Ignored error raised by actor (request uuid: '%s'): '%s'", request.uuid, error)
             raise last_error
-
-
-def system_from_config(cfg: types.AnyConfig = None) -> ActorSystem:
-    cfg = ActorConfig.from_config(cfg)
-    first_error: Exception | None = None
-    system_bases = [cfg.system_base]
-    if cfg.fallback_system_base and cfg.fallback_system_base != cfg.system_base:
-        system_bases.append(cfg.fallback_system_base)
-
-    for sb in system_bases:
-        try:
-            return system(
-                system_base=sb,
-                ip=cfg.ip,
-                admin_port=cfg.admin_port,
-                coordinator_ip=cfg.coordinator_ip,
-                coordinator_port=cfg.coordinator_port,
-                process_startup_method=cfg.process_startup_method,
-            )
-        except actors.ActorSystemException as ex:
-            LOG.exception("Failed setting up actor system with system base '%s'", sb)
-            first_error = first_error or ex
-    raise first_error or Exception(f"Could not initialize actor system with system base '{cfg.system_base}'")
-
-
-def system(
-    system_base: SystemBase | None = None,
-    ip: str | None = None,
-    admin_port: int | None = None,
-    coordinator_ip: str | None = None,
-    coordinator_port: int | None = None,
-    process_startup_method: str | None = None,
-) -> ActorSystem:
-    if system_base and system_base not in typing.get_args(SystemBase):
-        raise ValueError(f"invalid system base value: '{system_base}', valid options are: {typing.get_args(SystemBase)}")
-
-    capabilities: dict[str, Any] = {"coordinator": True}
-    log_defs = None
-    if system_base in ("multiprocTCPBase", "multiprocUDPBase"):
-        if ip:
-            ip, admin_port = resolve(ip, admin_port)
-            capabilities["ip"] = ip
-
-        if admin_port:
-            capabilities["Admin Port"] = admin_port
-
-        if coordinator_ip:
-            coordinator_ip, coordinator_port = resolve(coordinator_ip, coordinator_port)
-            if coordinator_port:
-                coordinator_port = int(coordinator_port)
-                if coordinator_port:
-                    coordinator_ip += f":{coordinator_port}"
-            capabilities["Convention Address.IPv4"] = coordinator_ip
-            if ip and coordinator_ip != ip:
-                capabilities["coordinator"] = False
-
-    if system_base != "simpleSystemBase":
-        if process_startup_method:
-            if process_startup_method not in typing.get_args(ProcessStartupMethod):
-                raise ValueError(
-                    f"invalid process startup method value: '{process_startup_method}', valid options are: "
-                    f"{typing.get_args(ProcessStartupMethod)}"
-                )
-            capabilities["Process Startup Method"] = process_startup_method
-        log_defs = log.load_configuration()
-
-    return ActorSystem(systemBase=system_base, capabilities=capabilities, logDefs=log_defs)
 
 
 def resolve(host: str, port: int | None = None, family: int = socket.AF_INET, proto: int = socket.IPPROTO_TCP) -> tuple[str, int | None]:

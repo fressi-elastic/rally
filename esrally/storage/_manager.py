@@ -43,13 +43,18 @@ class Get:
 
 @dataclasses.dataclass
 class TransferManager:
-    actor: actors.ActorAddress
+    cfg: StorageConfig
+    actor_address: actors.ActorAddress
 
     @classmethod
     def from_config(cls, cfg: types.AnyConfig = None) -> Self:
         """It creates a TransferManager with initialization values taken from given configuration."""
         cfg = StorageConfig.from_config(cfg)
-        return cls(actor=StorageActor.from_config(cfg))
+        return cls(cfg, TransferActor.from_config(cfg))
+
+    @property
+    def system(self) -> actor.ActorSystem:
+        return actor.ActorSystem.from_config(self.cfg)
 
     def get(
         self, url: str, path: str | None = None, expected_size: int | None = None, timeout: float | None = None, wait: bool = False
@@ -63,14 +68,15 @@ class TransferManager:
         :param timeout: timeout in seconds.
         :return: transfer status object.
         """
-        s = actor.system()
         while True:
-            for status in s.request(self.actor, Get(url=url, path=path, expected_size=expected_size), timeout=timeout, retry_interval=0.1):
+            for status in self.system.request(
+                self.actor_address, Get(url=url, path=path, expected_size=expected_size), timeout=timeout, retry_interval=0.1
+            ):
                 if status.finished or not wait:
                     return status
 
     def shutdown(self):
-        return actor.system().ask(self.actor, actors.ActorExitRequest())
+        return self.system.ask(self.actor_address, actors.ActorExitRequest())
 
 
 @dataclasses.dataclass
@@ -85,7 +91,7 @@ class TransferStatus:
     average_speed: float | None = None
 
 
-class StorageActor(actor.LocalActor):
+class TransferActor(actor.LocalActor):
 
     config_class = StorageConfig
 
@@ -99,10 +105,6 @@ class StorageActor(actor.LocalActor):
         self._executor: executors.Executor | None = None
         self.transfers: dict[str, Transfer] = {}
         self.timer_id: int = 0
-
-    @property
-    def cfg(self) -> StorageConfig:
-        return StorageConfig.from_config(super().cfg)
 
     @property
     def client(self) -> Client:
@@ -157,8 +159,7 @@ class StorageActor(actor.LocalActor):
         if timer_id != self.timer_id:
             return self.SUPER
         self.update_transfers()
-        if self.client is not None:
-            self.client.monitor()
+        self.client.monitor()
         self.wakeupAfter(timePeriod=datetime.timedelta(seconds=interval), payload=msg.payload)
 
     def update_transfers(self) -> None:
@@ -209,7 +210,7 @@ class StorageActor(actor.LocalActor):
                 path=path,
                 document_length=head.content_length,
                 executor=self.executor,
-                multipart_size=self.cfg.multipart_size,
+                multipart_size=cfg.multipart_size,
                 crc32c=head.crc32c,
             )
             if not transfer.finished:
@@ -236,7 +237,7 @@ class StorageActor(actor.LocalActor):
 
     @property
     def max_connections(self) -> int:
-        max_connections = self.cfg.max_connections
+        max_connections = StorageConfig.from_config(self.cfg).max_connections
         number_of_transfers = len(self.transfers)
         if number_of_transfers > 0:
             max_workers = max(1, self.executor.max_workers or 1)

@@ -233,6 +233,10 @@ class Task(Generic[R]):
             raise RuntimeError("Task handler has already been set.")
         self._handler = value
 
+    @property
+    def system(self) -> actor.ActorSystem:
+        return actor.ActorSystem.from_config()
+
     def __call__(self) -> R:
         try:
             return self._task_executed(TaskExecuted(self.func(*self.args, **self.kwargs)))
@@ -243,7 +247,7 @@ class Task(Generic[R]):
     def _task_executed(self, executed: TaskExecuted[R]) -> R:
         res = executed.result
         if isinstance(self._handler, actors.ActorAddress):
-            actor.system().tell(self._handler, executed)
+            self.system.tell(self._handler, executed)
             return res
         if isinstance(self._handler, futures.Future):
             self._handler.set_result(res)
@@ -254,7 +258,7 @@ class Task(Generic[R]):
     def _task_failed(self, failed: TaskFailed) -> None:
         err = failed.error
         if isinstance(self._handler, actors.ActorAddress):
-            actor.system().tell(self._handler, failed)
+            self.system.tell(self._handler, failed)
             return
         if isinstance(self._handler, futures.Future):
             self._handler.set_exception(err)
@@ -406,17 +410,24 @@ class LocalThreadPoolActor(actor.LocalActor):
 class LocalThreadPoolExecutor(Executor):
     """Executor class that runs tasks from a global actor of class LocalThreadPoolActor running locally."""
 
-    actor = LocalThreadPoolActor
+    actor_class = LocalThreadPoolActor
+    cfg: ExecutorsConfig
     task = LocalTask
 
     @classmethod
     def from_config(cls, cfg: types.AnyConfig = None) -> Self:
-        return cls(cls.actor.from_config(cfg=cfg))
+        cfg = ExecutorsConfig.from_config(cfg)
+        return cls(cfg=cfg, actor=cls.actor_class.from_config(cfg=cfg))
 
-    def __init__(self, actor: actors.ActorAddress) -> None:
+    def __init__(self, cfg: types.AnyConfig, actor: actors.ActorAddress) -> None:
+        self.cfg = ExecutorsConfig.from_config(cfg)
         self.actor = actor
         self.handler: actors.ActorAddress | None = None
         self._results_dir = tempfile.mkdtemp()
+
+    @property
+    def system(self) -> actor.ActorSystem:
+        return actor.ActorSystem.from_config(self.cfg)
 
     def submit(self, fn, /, *args, **kwargs) -> futures.Future:
         """It submits a callable to be executed with the given arguments.
@@ -438,7 +449,7 @@ class LocalThreadPoolExecutor(Executor):
             task.handler = self.handler
         elif isinstance(task, LocalTask):
             task.result_file = self._new_result_file()
-        actor.system().tell(self.actor, task)
+        self.system.tell(self.actor, task)
 
         assert isinstance(task.handler, futures.Future)
         return task.handler
