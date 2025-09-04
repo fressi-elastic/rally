@@ -133,12 +133,17 @@ class BaseActor(actors.ActorTypeDispatcher):
             self._cfg = self.config_class.from_config()
         return self._cfg
 
-    def receiveMsg_ActorConfig(self, msg: ActorConfig, sender: actors.ActorAddress) -> None:
-        self._cfg = msg
-        self.configure_actor(msg)
+    @cfg.setter
+    def cfg(self, value: types.AnyConfig) -> None:
+        self._cfg = cfg = self.config_class.from_config(value)
+        self.configure_actor(cfg)
 
     def configure_actor(self, cfg: ActorConfig) -> None:
         self.logger.debug("Actor configuration received: %s.", cfg)
+
+    def receiveMsg_ActorConfig(self, msg: ActorConfig, sender: actors.ActorAddress) -> None:
+        self.cfg = msg
+        self.configure_actor(msg)
 
     def receiveMsg_Request(self, request: Request, sender: actors.ActorAddress) -> None:
         result: Any = None
