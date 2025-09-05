@@ -43,18 +43,20 @@ def multiproc_system_base(request: pytest.FixtureRequest) -> str:
 
 
 @pytest.fixture(scope="function")
-def simple_actor_system() -> abc.Iterator[actors.ActorSystem]:
-    asys = actors.ActorSystem("simpleSystemBase")
+def simple_actor_system(monkeypatch: pytest.MonkeyPatch) -> abc.Iterator[actors.ActorSystem]:
+    asys = actors.ActorSystem("simpleSystemBase", transientUnique=True)
+    monkeypatch.setattr(actor, "__CURRENT_ACTOR_SYSTEM", (asys, os.getpid()))
     yield asys
     asys.shutdown()
 
 
 @pytest.fixture(scope="function")
-def multiproc_actor_system(multiproc_system_base: str, process_startup_method: str | None) -> abc.Iterator[actors.ActorSystem]:
+def multiproc_actor_system(monkeypatch: pytest.MonkeyPatch, multiproc_system_base: str, process_startup_method: str | None) -> abc.Iterator[actors.ActorSystem]:
     capabilities = {}
     if process_startup_method:
         capabilities["Process Starting Method"] = process_startup_method
-    asys = actors.ActorSystem(multiproc_system_base, capabilities)
+    asys = actors.ActorSystem(multiproc_system_base, capabilities, transientUnique=True)
+    monkeypatch.setattr(actor, "__CURRENT_ACTOR_SYSTEM", (asys, os.getpid()))
     try:
         yield asys
     finally:

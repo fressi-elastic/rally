@@ -69,8 +69,10 @@ class TransferManager:
         :return: transfer status object.
         """
         while True:
-            for status in self.system.request(
-                self.actor_address, Get(url=url, path=path, expected_size=expected_size), timeout=timeout, retry_interval=0.1
+            for status in actor.request(
+                self.actor_address,
+                Get(url=url, path=path, expected_size=expected_size),
+                timeout=timeout,
             ):
                 if status.finished or not wait:
                     return status

@@ -90,7 +90,6 @@ class Success:
 class BenchmarkActor(actor.RallyActor):
     def __init__(self):
         super().__init__()
-        self.cfg: Optional[types.Config] = None
         self.start_sender = None
         self.mechanic = None
         self.main_driver = None
@@ -285,7 +284,7 @@ class BenchmarkCoordinator:
 def race(cfg: types.Config, sources=False, distribution=False, external=False, docker=False):
     logger = logging.getLogger(__name__)
     # at this point an actor system has to run and we should only join
-    actor_system = actor.bootstrap_actor_system(try_join=True)
+    actor_system = actor.init_system(cfg)
     benchmark_actor = actor_system.createActor(BenchmarkActor, targetActorRequirements={"coordinator": True})
     try:
         result = actor_system.ask(benchmark_actor, Setup(cfg, sources, distribution, external, docker))

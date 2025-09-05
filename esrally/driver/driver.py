@@ -235,10 +235,10 @@ class DriverActor(actor.RallyActor):
         self.post_process_timer = 0
         self.cluster_details = {}
 
-    def receiveMsg_PoisonMessage(self, poisonmsg, sender):
-        self.logger.error("Main driver received a fatal indication from a load generator (%s). Shutting down.", poisonmsg.details)
+    def receiveMsg_PoisonMessage(self, msg, sender):
+        self.logger.error("Main driver received a fatal indication from a load generator (%s). Shutting down.", msg.details)
         self.driver.close()
-        self.send(self.benchmark_actor, actor.BenchmarkFailure("Fatal track or load generator indication", poisonmsg.details))
+        self.send(self.benchmark_actor, actor.BenchmarkFailure("Fatal track or load generator indication", msg.details))
 
     def receiveMsg_BenchmarkFailure(self, msg, sender):
         self.logger.error("Main driver received a fatal exception from a load generator. Shutting down.")
@@ -404,7 +404,6 @@ class TaskExecutionActor(actor.RallyActor):
         self.wakeup_interval = 5
         self.task_preparation_actor = None
         self.track_name = None
-        self.cfg: Optional[types.Config] = None
 
     @actor.no_retry()
     def receiveMsg_StartTaskLoop(self, msg, sender):
@@ -471,13 +470,12 @@ class TrackPreparationActor(actor.RallyActor):
         self.status = self.Status.INITIALIZING
         self.children = []
         self.tasks = []
-        self.cfg: Optional[types.Config] = None
         self.data_root_dir = None
         self.track = None
 
-    def receiveMsg_PoisonMessage(self, poisonmsg, sender):
-        self.logger.error("Track Preparator received a fatal indication from a load generator (%s). Shutting down.", poisonmsg.details)
-        self.send(self.driver_actor, actor.BenchmarkFailure("Fatal track preparation indication", poisonmsg.details))
+    def receiveMsg_PoisonMessage(self, msg, sender):
+        self.logger.error("Track preparator received a fatal indication from a load generator (%s). Shutting down.", msg.details)
+        self.send(self.driver_actor, actor.BenchmarkFailure("Fatal track preparation indication", msg.details))
 
     @actor.no_retry()
     def receiveMsg_Bootstrap(self, msg, sender):
@@ -852,11 +850,10 @@ class Driver:
                 self.telemetry.on_benchmark_stop()
                 self.logger.info("All steps completed.")
                 # Some metrics store implementations return None because no external representation is required.
-                # pylint: disable=assignment-from-none
-                m = self.metrics_store.to_externalizable(clear=True)
+                m = self.metrics_store.to_externalizable(clear=True)  # pylint: disable=assignment-from-none
                 self.logger.debug("Closing metrics store...")
                 self.metrics_store.close()
-                # immediately clear as we don't need it anymore and it can consume a significant amount of memory
+                # immediately clear as we don't need it anymore, and it can consume a significant amount of memory
                 self.metrics_store = None
                 if self.generated_api_key_ids:
                     self.logger.debug("Deleting auto-generated client API keys...")
@@ -885,8 +882,7 @@ class Driver:
             #             (it doesn't matter too much if we're a few ms off).
             waiting_period = 1.0
         # Some metrics store implementations return None because no external representation is required.
-        # pylint: disable=assignment-from-none
-        m = self.metrics_store.to_externalizable(clear=True)
+        m = self.metrics_store.to_externalizable(clear=True)  # pylint: disable=assignment-from-none
         self.driver_actor.on_task_finished(m, waiting_period)
         # Using a perf_counter here is fine also in the distributed case as we subtract it from `master_received_msg_at` making it
         # a relative instead of an absolute value.

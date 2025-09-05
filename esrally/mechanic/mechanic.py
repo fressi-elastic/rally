@@ -337,7 +337,6 @@ class MechanicActor(actor.RallyActor):
 
     def __init__(self):
         super().__init__()
-        self.cfg: Optional[types.Config] = None
         self.race_control = None
         self.cluster_launcher = None
         self.cluster = None

@@ -29,7 +29,10 @@ from collections.abc import Callable
 from concurrent import futures
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
-from thespian import actors
+from thespian import actors  # type: ignore[import-untyped]
+from thespian.system.logdirector import (  # type: ignore[import-untyped]
+    ThespianLogForwarder,
+)
 from typing_extensions import Self, TypeAlias
 
 from esrally import actor, log, types
@@ -130,35 +133,33 @@ class ProcessPoolHelper:
     level: int = LOG_FORWARDER_LEVEL
 
     @classmethod
-    def from_config(cls, cfg: types.AnyConfig = None) -> Self:
+    def from_config(cls, cfg: types.Config) -> Self:
         cfg = ExecutorsConfig.from_config(cfg)
-        actor_system = actor.system_from_config(cfg)
-        helper = cls(
+        return cls(
             cfg=cfg,
-            actor=actor_system.createActor(ProcessPoolHelperActor, globalName=f"{__name__}:ProcessPoolHelperActor"),
+            actor=ProcessPoolHelperActor.from_config(cfg),
             level=cfg.log_forwarder_level,
         )
-        return helper
 
     def initialize_subprocess(self) -> None:
         """It prepares the new subprocess before taking tasks to execute."""
-
         # Initialize logging system.
         if self.level:
             logging.root.setLevel(self.level)
-        logging.root.addHandler(LogForwarderHandler(self.level, self.actor))
+        if not isinstance(logging.root, ThespianLogForwarder):
+            logging.root.addHandler(LogForwarderHandler(self.level, self.actor))
         log.post_configure_logging()
         console.set_assume_tty(assume_tty=False)
 
         # Initialize actor system.
-        actor.system_from_config(cfg=self.cfg)
+        actor.init_system(self.cfg)
 
         LOG.debug("Executor subprocess initialized: pid=%d.", os.getpid())
 
     def shutdown(self) -> None:
         """It waits for all log records to be handled before shutting down the helper actor."""
         LOG.debug("Send actor exit request.")
-        actors.ActorSystem().ask(self.actor, actors.ActorExitRequest())
+        actor.system().ask(self.actor, actors.ActorExitRequest())
 
 
 @dataclasses.dataclass
@@ -207,7 +208,7 @@ class LogForwarderHandler(logging.Handler):
         return LogForwarderRecord(record)
 
 
-class ProcessPoolHelperActor(actor.BaseActor):
+class ProcessPoolHelperActor(actor.LocalActor):
 
     @staticmethod
     def receiveMsg_ExecutorLogRecord(msg: LogForwarderRecord, sender: actors.ActorAddress) -> None:
@@ -233,10 +234,6 @@ class Task(Generic[R]):
             raise RuntimeError("Task handler has already been set.")
         self._handler = value
 
-    @property
-    def system(self) -> actor.ActorSystem:
-        return actor.ActorSystem.from_config()
-
     def __call__(self) -> R:
         try:
             return self._task_executed(TaskExecuted(self.func(*self.args, **self.kwargs)))
@@ -247,7 +244,7 @@ class Task(Generic[R]):
     def _task_executed(self, executed: TaskExecuted[R]) -> R:
         res = executed.result
         if isinstance(self._handler, actors.ActorAddress):
-            self.system.tell(self._handler, executed)
+            actor.system().tell(self._handler, executed)
             return res
         if isinstance(self._handler, futures.Future):
             self._handler.set_result(res)
@@ -258,7 +255,7 @@ class Task(Generic[R]):
     def _task_failed(self, failed: TaskFailed) -> None:
         err = failed.error
         if isinstance(self._handler, actors.ActorAddress):
-            self.system.tell(self._handler, failed)
+            actor.system().tell(self._handler, failed)
             return
         if isinstance(self._handler, futures.Future):
             self._handler.set_exception(err)

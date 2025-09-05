@@ -50,6 +50,7 @@ class DummyActorSystem:
 @pytest.fixture(autouse=True)
 def dummy_actor_system(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(thespian.actors, "ActorSystem", DummyActorSystem)
+    monkeypatch.setattr(actor, "__CURRENT_ACTOR_SYSTEM", None)
 
 
 def resolve(host: str, port: int | None = None):
