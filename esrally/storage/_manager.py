@@ -20,11 +20,12 @@ import dataclasses
 import datetime
 import logging
 import os
+import time
 
 from thespian import actors  # type: ignore[import-untyped]
 from typing_extensions import Self
 
-from esrally import actor, types
+from esrally import actor, types, exceptions
 from esrally.actor import ActorConfig
 from esrally.storage._client import Client
 from esrally.storage._config import StorageConfig
@@ -57,28 +58,46 @@ class TransferManager:
         return actor.ActorSystem.from_config(self.cfg)
 
     def get(
-        self, url: str, path: str | None = None, expected_size: int | None = None, timeout: float | None = None, wait: bool = False
+        self, url: str, path: str | None = None, expected_size: int | None = None, timeout: float | None = None
     ) -> TransferStatus:
         """It starts a new transfer of a file from a remote url to a local path.
 
         :param url: remote file address.
         :param path: local file address.
         :param expected_size: the expected file size in bytes.
-        :param wait: if True it waits until the transfer completes before returning.
         :param timeout: timeout in seconds.
         :return: transfer status object.
         """
-        while True:
-            for status in actor.request(
+        status = None
+        try:
+            for response in actor.request(
                 self.actor_address,
                 Get(url=url, path=path, expected_size=expected_size),
                 timeout=timeout,
+                retry_interval=1.,  # It will re-send the request every second to update the status.
             ):
-                if status.finished or not wait:
-                    return status
+                status = response.result(timeout=timeout)
+                if status.finished:
+                    break
+        except Exception as ex:
+            cause = ex
+        else:
+            cause = None
+        if status is None:
+            raise TimeoutError("File transfer request timed out.") from cause
+        if not isinstance(status, TransferStatus):
+            raise TypeError(f"Expected TransferStatus, got { type(status)} instead.") from cause
+        if not status.finished:
+            raise TransferInterrupted("File transfer interrupted.") from cause
+        return status
 
     def shutdown(self):
         return self.system.ask(self.actor_address, actors.ActorExitRequest())
+
+
+class TransferInterrupted(exceptions.RallyError):
+    """Raised when a transfer has been interrupted for some reason
+    """
 
 
 @dataclasses.dataclass
@@ -235,7 +254,7 @@ class TransferActor(actor.LocalActor):
             progress=transfer.progress,
             average_speed=transfer.average_speed,
         )
-        self.send(sender, actor.Result(res=status))
+        self.send(sender, status)
 
     @property
     def max_connections(self) -> int:

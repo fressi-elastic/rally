@@ -17,9 +17,14 @@
 from __future__ import annotations
 
 import enum
+import sys
+
 import math
+import time
 from collections.abc import Callable, Iterable
 from typing import TypeVar
+
+from typing_extensions import Self, TypeAlias
 
 
 class Size(int):
@@ -147,8 +152,8 @@ class Duration(int):
     def to_unit(self, unit: Unit) -> float:
         return float(self / unit)
 
-    def ns(self) -> float:
-        return self.to_unit(Duration.Unit.NS)
+    def ns(self) -> int:
+        return self
 
     def us(self):
         return self.to_unit(Duration.Unit.US)
@@ -195,13 +200,18 @@ class Duration(int):
         return " ".join(parts)
 
 
-def duration(x: int | float, unit: Duration.Unit = Duration.Unit.S) -> Duration:
+MAX_DURATION = Duration(sys.maxsize)
+
+
+AnyDuration: TypeAlias = Duration | float | int
+
+def duration(x: AnyDuration, unit: Duration.Unit = Duration.Unit.S) -> Duration:
     if isinstance(x, Duration):
         return x
     return Duration(x * unit)
 
 
-def seconds_to_ms(x: int | float | None) -> float | None:
+def seconds_to_ms(x: AnyDuration | None) -> float | None:
     if x is None:
         return None
     return duration(x, Duration.Unit.S).ms()
@@ -217,6 +227,48 @@ def ms_to_minutes(x: int | float | None) -> float | None:
     if x is None:
         return None
     return duration(x, Duration.Unit.MS).m()
+
+
+class Deadline(int):
+
+    @classmethod
+    def now(cls) -> Self:
+        return time.monotonic_ns()
+
+    # def __sub__(self, other: Deadline) -> Duration:
+    #     result = self - other
+    #     return Duration(result)
+    #
+    # def __add__(self, other: Duration) -> Deadline:
+    #     return Deadline(self + other)
+
+
+MAX_DEADLINE = Deadline(sys.maxsize)
+
+
+AnyDeadline = Deadline | float | int
+
+
+def deadline(x: AnyDeadline, unit: Duration.Unit = Duration.Unit.NS) -> Deadline:
+    if isinstance(x, Deadline):
+        return x
+    return Deadline(x * unit)
+
+
+def to_deadline(*timeouts: AnyDuration | None, unit: Duration.Unit = Duration.Unit.NS) -> Deadline:
+    tos = [duration(d, unit) for d in timeouts if d not in [None, MAX_DURATION]]
+    if not tos:
+        return MAX_DEADLINE
+    # Note: duration internally is using nanoseconds integers.
+    return Deadline(Deadline.now() + max(0, min(timeouts)))
+
+
+def time_left(*deadlines: AnyDeadline | None, unit: Duration.Unit = Duration.Unit.NS) -> Duration:
+    deadlines = tuple(deadline(d, unit) for d in deadlines if d not in [None, MAX_DEADLINE])
+    if not deadlines:
+        return MAX_DURATION
+    # Note: duration internally is using nanoseconds integers.
+    return Duration(max(0, min(deadlines) - Deadline.now()))
 
 
 N = TypeVar("N", float, int)

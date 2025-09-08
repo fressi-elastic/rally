@@ -21,13 +21,13 @@ import functools
 import logging
 import os
 import socket
-import time
 import traceback
 import typing
 import uuid
 from collections.abc import Callable, Generator
 from typing import Any
 
+from blib2to3.pytree import convert
 from thespian import actors  # type: ignore[import-untyped]
 from thespian.system.logdirector import (  # type: ignore[import-untyped]
     ThespianLogForwarder,
@@ -35,7 +35,7 @@ from thespian.system.logdirector import (  # type: ignore[import-untyped]
 from typing_extensions import Self, TypeAlias
 
 from esrally import config, exceptions, log, types
-from esrally.utils import console
+from esrally.utils import console, convert
 
 LOG = logging.getLogger(__name__)
 
@@ -131,6 +131,7 @@ class BaseActor(actors.ActorTypeDispatcher):
         cls = type(self)
         self.logger = logging.getLogger(f"{cls.__module__}:{cls.__name__}")
         self.logger.debug("Initializing actor (pid=%d): '%s'.", os.getpid(), self)
+        self._response_id: uuid.UUID | None = None
 
     @property
     def cfg(self) -> ActorConfig:
@@ -160,14 +161,19 @@ class BaseActor(actors.ActorTypeDispatcher):
         self.configure_actor(cfg)
 
     def receiveMsg_Request(self, request: Request, sender: actors.ActorAddress) -> None:
-        self.send(sender, Response(request.uuid))
+        self._response_id = request.uuid
         try:
-            result = self.receiveMessage(request.message, sender)
+            self.receiveMessage(request.message, sender)
         except Exception as ex:
             LOG.exception("Failed processing request: %s", request)
-            self.send(sender, Error(uuid=request.uuid, err=ex, done=True))
-        else:
-            self.send(sender, Result(uuid=request.uuid, res=result, done=True))
+            self.send(sender, Error(err=ex))
+        finally:
+            self._response_id = None
+
+    def send(self, targetAddr: actors.ActorAddress, msg: Any) -> None:
+        if self._response_id is not None:
+            msg = as_response(msg, uuid=self._response_id)
+        return super().send(targetAddr, msg)
 
     def receiveMsg_Response(self, response: Response, sender: actors.ActorAddress) -> None:
         LOG.debug("Actor response received: %s", response)
@@ -615,17 +621,17 @@ def quit_system() -> None:
 def request(
     actor_address: actors.ActorAddress,
     msg: Any,
-    timeout: float | None = None,
-    retry_interval: float | None = None,
+    timeout: convert.Duration | float | None = None,
+    retry_interval: convert.Duration | float | None = None,
     retry_errors: tuple[type[Exception], ...] = tuple(),
-) -> Generator[Any]:
+) -> Generator[Response, None, None]:
     """It rewrites thespian ActorSystem.ask method raising a TimeoutError when request execution times out.
 
     This wraps ask method doing the following after running original implementation:
         - It yields results sent back by the actor.
         - It wraps the msg with a Request object to ensure
             - target actor will send an Error message in case of an unhandled exception.
-            - target actor will finally send Response message with done=True when finished handling the request.
+            - target actor will finally send Response message when finished handling the request.
         - It raises timeout exception when request execution times out.
         - It writes to log a warning for poison messages received.
         - It finally raises the last Error received by the actor.
@@ -642,78 +648,51 @@ def request(
     else:
         request = Request(msg)
 
-    ask_deadline: float | None = time.monotonic()
-    if timeout is None:
-        final_deadline = None
-    else:
-        final_deadline = time.monotonic() + timeout
+    final_deadline = convert.to_deadline(timeout, unit=convert.Duration.Unit.S)
+    ask_deadline = 0  # It will send it now.
 
-    uuids: set[uuid.UUID] = set()
-    errors: list[Exception] = []
+    sent_ids: set[uuid.UUID] = set()
     req_id: uuid.UUID | None = None
     res_id: uuid.UUID | None = None
-    while True:
-        if ask_deadline is not None and ask_deadline <= time.monotonic():
-            if final_deadline is not None:
-                timeout = final_deadline - time.monotonic()
-            request.uuid = req_id = uuid.uuid4()
-            uuids.add(req_id)
-            response = s.ask(actor_address, request, timeout=timeout)
-            if retry_interval is None:
-                ask_deadline = None
-            else:
-                ask_deadline = time.monotonic() + retry_interval
-        else:
-            deadlines = [d for d in [ask_deadline, final_deadline] if d is not None]
-            if deadlines:
-                timeout = min(deadlines) - time.monotonic()
-            else:
-                timeout = None
-            response = s.listen(timeout=timeout)
 
-        result = None
+    while True:
+        timeout = convert.time_left(final_deadline).s()
+        if not convert.time_left(ask_deadline, final_deadline).s():
+            request.uuid = req_id = uuid.uuid4()
+            response = s.ask(actor_address, request, timeout)
+            ask_deadline = convert.to_deadline(retry_interval, unit=convert.Duration.Unit.S)
+            sent_ids.add(req_id)
+        else:
+            response = s.listen(timeout)
+
+        if response is None:
+            if timeout:
+                continue
+            yield Error(req_id, TimeoutError(f"Timed out while asking '{actor_address}' for '{msg}'"))
+            break
+
         if isinstance(response, Response):
             res_id = response.uuid or res_id
+            if res_id not in sent_ids:
+                LOG.warning("Ignored response sent by actor: '%s'", response)
+                continue
             try:
-                r = response.result(timeout=timeout)
-            except Exception as e:
-                if res_id in uuids:
-                    errors.append(e)
-                    if not isinstance(e, retry_errors):
-                        retry_interval = None
-                else:
-                    LOG.warning("Ignored error raised by actor (req_id: '%s'): '%s'", res_id, e)
+                response.result(timeout)
+            except retry_errors as e:
+                LOG.info("Retrying on error: '%s'", e)
+            except Exception:
+                yield response
             else:
-                result = r
-            if response.done:
-                if res_id == req_id:
-                    if retry_interval is None:
-                        break
-                if res_id in uuids:
-                    uuids.remove(res_id)
-        elif isinstance(response, actors.PoisonMessage):
-            LOG.warning("Ignored poison message: '%s'", response.details)
-        elif response is not None:
-            result = response
+                yield response
+            continue
 
-        if result is not None:
-            if res_id in uuids:
-                yield result
-            else:
-                LOG.warning("Ignored result returned by actor (req_id: '%s'): '%r'", res_id, result)
+        if isinstance(response, (actors.PoisonMessage, BenchmarkFailure)):
+            # Here the goal is to log all the errors received by the server, except the last that it
+            # will be raised.
+            yield Error(req_id, RuntimeError(f"Unexpected error: '{response}'"))
+            continue
 
-        if final_deadline is not None:
-            timeout = final_deadline - time.monotonic()
-            if timeout < 0:
-                errors.append(TimeoutError(f"Timed out while asking '{actor_address}' for '{msg}'"))
-                break
-
-    if errors:
-        # Write to log all errors except the last one, and then it raises it.
-        last_error = errors.pop()
-        for error in errors:
-            LOG.warning("Ignored error raised by actor (request uuid: '%s'): '%s'", request.uuid, error)
-        raise last_error
+        LOG.warning("Ignored message send by actor: '%s'", response)
 
 
 @dataclasses.dataclass
@@ -734,15 +713,20 @@ class Response:
     # uuid is used to match a request with its responses.
     uuid: uuid.UUID | None = None
 
-    # done is used to tell requester the request has been processed and therefore no more messages with the same UUID are expected.
-    done: bool = False
-
     def result(self, timeout: float | None = None) -> Any:
         """It returns the result of the request or raises an exception.
         :param timeout: timeout in seconds to wait for the response (in case it is not ready)
         :return:
         """
         return None
+
+
+def as_response(msg: Any, uuid: uuid.UUID | None = None) -> Response:
+    if isinstance(msg, Response):
+        return msg
+    if isinstance(msg, Exception):
+        return Error(uuid, msg)
+    return Result(uuid, msg)
 
 
 @dataclasses.dataclass

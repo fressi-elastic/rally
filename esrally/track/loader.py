@@ -552,7 +552,7 @@ class Downloader:
         if self.transfer_manager is not None:
             LOG.info("Downloading data from [%s] to [%s] using transfer manager...", data_url, target_path)
             try:
-                self.transfer_manager.get(url=data_url, path=target_path, expected_size=size_in_bytes, wait=True)
+                self.transfer_manager.get(url=data_url, path=target_path, expected_size=size_in_bytes)
                 LOG.info("Downloaded data from [%s] to [%s] using transfer manager.", data_url, target_path)
                 return
             except FileNotFoundError as ex:
