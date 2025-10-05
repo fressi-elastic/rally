@@ -90,6 +90,7 @@ class Success:
 class BenchmarkActor(actor.RallyActor):
     def __init__(self):
         super().__init__()
+        self.cfg: Optional[types.Config] = None
         self.start_sender = None
         self.mechanic = None
         self.main_driver = None
@@ -101,7 +102,10 @@ class BenchmarkActor(actor.RallyActor):
             self.coordinator.error = True
         self.send(self.start_sender, msg)
 
-    @actor.no_retry()
+    def receiveUnrecognizedMessage(self, msg, sender):
+        self.logger.debug("BenchmarkActor received unknown message [%s] (ignoring).", (str(msg)))
+
+    @actor.no_retry("race control")  # pylint: disable=no-value-for-parameter
     def receiveMsg_Setup(self, msg, sender):
         self.start_sender = sender
         self.cfg = msg.cfg
@@ -122,7 +126,7 @@ class BenchmarkActor(actor.RallyActor):
             ),
         )
 
-    @actor.no_retry()
+    @actor.no_retry("race control")  # pylint: disable=no-value-for-parameter
     def receiveMsg_EngineStarted(self, msg, sender):
         assert self.cfg is not None
         self.logger.info("Mechanic has started engine successfully.")
@@ -131,33 +135,33 @@ class BenchmarkActor(actor.RallyActor):
         self.logger.info("Telling driver to prepare for benchmarking.")
         self.send(self.main_driver, driver.PrepareBenchmark(self.cfg, self.coordinator.current_track))
 
-    @actor.no_retry()
+    @actor.no_retry("race control")  # pylint: disable=no-value-for-parameter
     def receiveMsg_PreparationComplete(self, msg, sender):
         self.coordinator.on_preparation_complete(msg.distribution_flavor, msg.distribution_version, msg.revision)
         self.logger.info("Telling driver to start benchmark.")
         self.send(self.main_driver, driver.StartBenchmark())
 
-    @actor.no_retry()
+    @actor.no_retry("race control")  # pylint: disable=no-value-for-parameter
     def receiveMsg_TaskFinished(self, msg, sender):
         self.coordinator.on_task_finished(msg.metrics)
         # We choose *NOT* to reset our own metrics store's timer as this one is only used to collect complete metrics records from
         # other stores (used by driver and mechanic). Hence there is no need to reset the timer in our own metrics store.
         self.send(self.mechanic, mechanic.ResetRelativeTime(msg.next_task_scheduled_in))
 
-    @actor.no_retry()
+    @actor.no_retry("race control")  # pylint: disable=no-value-for-parameter
     def receiveMsg_BenchmarkCancelled(self, msg, sender):
         self.coordinator.cancelled = True
         # even notify the start sender if it is the originator. The reason is that we call #ask() which waits for a reply.
         # We also need to ask in order to avoid races between this notification and the following ActorExitRequest.
         self.send(self.start_sender, msg)
 
-    @actor.no_retry()
+    @actor.no_retry("race control")  # pylint: disable=no-value-for-parameter
     def receiveMsg_BenchmarkFailure(self, msg, sender):
         self.logger.info("Received a benchmark failure from [%s] and will forward it now.", sender)
         self.coordinator.error = True
         self.send(self.start_sender, msg)
 
-    @actor.no_retry()
+    @actor.no_retry("race control")  # pylint: disable=no-value-for-parameter
     def receiveMsg_BenchmarkComplete(self, msg, sender):
         self.coordinator.on_benchmark_complete(msg.metrics)
         self.send(self.main_driver, thespian.actors.ActorExitRequest())
@@ -165,7 +169,7 @@ class BenchmarkActor(actor.RallyActor):
         self.logger.info("Asking mechanic to stop the engine.")
         self.send(self.mechanic, mechanic.StopEngine())
 
-    @actor.no_retry()
+    @actor.no_retry("race control")  # pylint: disable=no-value-for-parameter
     def receiveMsg_EngineStopped(self, msg, sender):
         self.logger.info("Mechanic has stopped engine successfully.")
         self.send(self.start_sender, Success())
@@ -284,7 +288,7 @@ class BenchmarkCoordinator:
 def race(cfg: types.Config, sources=False, distribution=False, external=False, docker=False):
     logger = logging.getLogger(__name__)
     # at this point an actor system has to run and we should only join
-    actor_system = actor.init_system(cfg)
+    actor_system = actor.bootstrap_actor_system(try_join=True)
     benchmark_actor = actor_system.createActor(BenchmarkActor, targetActorRequirements={"coordinator": True})
     try:
         result = actor_system.ask(benchmark_actor, Setup(cfg, sources, distribution, external, docker))

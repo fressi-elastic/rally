@@ -21,7 +21,7 @@ import threading
 import time
 import urllib.parse
 from collections import defaultdict, deque
-from collections.abc import Iterator
+from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from random import Random
 from typing import NamedTuple
@@ -76,7 +76,7 @@ class Client:
     """It handles client instances allocation allowing reusing pre-allocated instances from the same thread."""
 
     @classmethod
-    def from_config(cls, cfg: types.AnyConfig = None) -> Self:
+    def from_config(cls, cfg: types.Config = None) -> Self:
         cfg = StorageConfig.from_config(cfg)
         adapters = AdapterRegistry.from_config(cfg)
         mirrors = MirrorList.from_config(cfg)
@@ -113,7 +113,7 @@ class Client:
     def adapters(self):
         return self._adapters
 
-    def head(self, url: str, ttl: float | None = None) -> Head:
+    async def head(self, url: str, ttl: float | None = None) -> Head:
         """It gets remote file headers."""
 
         if ttl is None:
@@ -130,7 +130,7 @@ class Client:
         adapter = self._adapters.get(url)
         start_time = time.monotonic()
         try:
-            head = adapter.head(url)
+            head = await adapter.head(url)
             error = None
         except Exception as ex:
             head = None
@@ -150,7 +150,7 @@ class Client:
         assert head is not None
         return head
 
-    def resolve(self, url: str, want: Head | None, ttl: float | None = None) -> Iterator[Head]:
+    async def resolve(self, url: str, want: Head | None, ttl: float | None = None) -> AsyncIterable[Head]:
         """It looks up mirror list for given URL and yield mirror heads.
         :param url: the remote file URL at its mirrored source location.
         :param want: extra parameters to mach remote heads.
@@ -185,7 +185,7 @@ class Client:
 
         for u in urls:
             try:
-                got = self.head(u, ttl=ttl)
+                got = await self.head(u, ttl=ttl)
                 if want is not None:
                     want.check(got)
             except CachedHeadError:
@@ -199,7 +199,7 @@ class Client:
             else:
                 yield got
 
-    def get(self, url: str, want: Head | None = None) -> tuple[Head, Iterator[bytes]]:
+    async def get(self, url: str, want: Head | None = None) -> tuple[Head, AsyncIterable[bytes]]:
         """It downloads a remote bucket object to a local file path.
 
         :param url: the URL of the remote file.
@@ -215,7 +215,7 @@ class Client:
             want_head = Head(accept_ranges=True, content_length=want.document_length, date=want.date, crc32c=want.crc32c)
         else:
             want_head = Head(content_length=want.content_length, date=want.date, crc32c=want.crc32c)
-        for got in self.resolve(url, want=want_head):
+        async for got in self.resolve(url, want=want_head):
             assert got.url is not None
             adapter = self._adapters.get(got.url)
             connections = self._server_connections(got.url)
@@ -225,7 +225,7 @@ class Client:
                 LOG.debug("connection limit exceeded for url '%s'", url)
                 continue
             try:
-                return adapter.get(got.url, want=want)
+                return await adapter.get(got.url, want=want)
             except ServiceUnavailableError as ex:
                 LOG.warning("service unavailable error received: url='%s' %s", url, ex)
                 with self._lock:

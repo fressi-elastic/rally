@@ -14,9 +14,9 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-from __future__ import annotations
 
 import configparser
+import contextvars
 import logging
 import os.path
 import shutil
@@ -28,6 +28,8 @@ from typing_extensions import Self
 
 from esrally import PROGRAM_NAME, exceptions, paths, types
 from esrally.utils import io
+
+LOG = logging.getLogger(__name__)
 
 
 class Scope(Enum):
@@ -129,7 +131,29 @@ def auto_load_local_config(base_config, additional_sections=None, config_file_cl
     return cfg
 
 
-class Config:
+CONFIG = contextvars.ContextVar[typing.Optional[types.Config]](f"{__name__}.config", default=None)
+
+
+def get_config() -> types.Config:
+    cfg = CONFIG.get()
+    if cfg is None:
+        raise exceptions.ConfigError("Config not initialized.")
+    return cfg
+
+
+def init_config(cfg: types.Config, *, force=False) -> types.Config:
+    if not force and CONFIG.get():
+        raise exceptions.ConfigError(f"Config already set: {cfg}")
+    cfg = Config.from_config(cfg)
+    CONFIG.set(cfg)
+    return cfg
+
+
+def clear_config() -> None:
+    CONFIG.set(None)
+
+
+class Config(types.Config):
     """
     Config is the main entry point to retrieve and set benchmark properties. It provides multiple scopes to allow overriding of values on
     different levels (e.g. a command line flag can override the same configuration property in the config file). These levels are
@@ -141,19 +165,14 @@ class Config:
     CURRENT_CONFIG_VERSION = 17
 
     @classmethod
-    def from_config(cls, cfg: types.AnyConfig = None) -> Self:
+    def from_config(cls, cfg: types.Config | None = None) -> Self:
+        if cfg is None:
+            cfg = get_config()
         if isinstance(cfg, cls):
             return cfg
         if isinstance(cfg, types.Config):
-            return cls(copy_from=cfg)
-        if cfg is None or isinstance(cfg, str):
-            cfg = cls(cfg)
-            try:
-                cfg.load_config(auto_upgrade=True)
-            except FileNotFoundError:
-                pass
-            return cfg
-        raise TypeError(f"unexpected cfg: got type {type(cfg).__name__}, expected Config, str or None")
+            return cls(opts_from=cfg)
+        raise TypeError(f"unexpected cfg: got type {type(cfg).__name__}, expected types.Config")
 
     def __init__(self, config_name: str | None = None, config_file_class=ConfigFile, copy_from: types.Config | None = None, **kwargs):
         self.name = config_name
@@ -217,8 +236,7 @@ class Config:
             else:
                 raise exceptions.ConfigError(f"No value for mandatory configuration: section='{section}', key='{key}'")
 
-    @staticmethod
-    def all_sections() -> list[types.Section]:
+    def all_sections(self) -> list[types.Section]:
         return list(typing.get_args(types.Section))
 
     def all_opts(self, section: types.Section) -> dict[str, typing.Any]:
@@ -317,6 +335,15 @@ class Config:
             return Scope.application, section, key
         else:
             return scope, section, key
+
+    def __eq__(self, other):
+        if not isinstance(other, Config):
+            return False
+        if other.name != self.name:
+            return False
+        if other._opts != self._opts:
+            return False
+        return True
 
 
 def migrate(config_file, current_version, target_version, out=print, i=input):

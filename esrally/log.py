@@ -28,8 +28,6 @@ import ecs_logging
 from esrally import paths
 from esrally.utils import collections, io
 
-LOG = logging.getLogger(__name__)
-
 
 # pylint: disable=unused-argument
 def configure_utc_formatter(*args: typing.Any, **kwargs: typing.Any) -> logging.Formatter:
@@ -112,38 +110,31 @@ def log_config_path():
     return os.path.join(paths.rally_confdir(), "logging.json")
 
 
-def add_missing_loggers_to_config():
-    """
-    Ensures that any missing top level loggers in resources/logging.json are
-    appended to an existing log configuration
-    """
+CONFIG_PATH = log_config_path()
+TEMPLATE_PATH = io.normalize_path(os.path.join(os.path.dirname(__file__), "resources", "logging.json"))
 
-    def _missing_loggers(source, target):
-        """
-        Returns any top-level loggers present in 'source', but not in 'target'
-        :return: A dict of all loggers present in 'source', but not in 'target'
-        """
-        missing_loggers = {}
-        for logger in source:
-            if logger in source and logger in target:
-                continue
-            else:
-                missing_loggers[logger] = source[logger]
-        return missing_loggers
 
-    source_path = io.normalize_path(os.path.join(os.path.dirname(__file__), "resources", "logging.json"))
+def add_missing_loggers_to_config(
+    *,
+    config_path: str = CONFIG_PATH,
+    template_path: str = TEMPLATE_PATH,
+):
+    """It appends any missing top level loggers found resources/logging.json to current log configuration."""
 
-    with open(log_config_path(), encoding="UTF-8") as target:
-        with open(source_path, encoding="UTF-8") as src:
-            template = json.load(src)
-            existing_logging_config = json.load(target)
-            if missing_loggers := _missing_loggers(source=template["loggers"], target=existing_logging_config["loggers"]):
-                existing_logging_config["loggers"].update(missing_loggers)
-                updated_config = json.dumps(existing_logging_config, indent=2)
+    with open(template_path, encoding="UTF-8") as fd:
+        template: dict[str, typing.Any] = json.load(fd)
+
+    with open(config_path, encoding="UTF-8") as fd:
+        config: dict[str, typing.Any] = json.load(fd)
+
+    missing_loggers: dict[str, typing.Any] = {
+        logger: value for logger, value in template["loggers"].items() if logger not in config["loggers"]
+    }
 
     if missing_loggers:
-        with open(log_config_path(), "w", encoding="UTF-8") as target:
-            target.write(updated_config)
+        config["loggers"].update(missing_loggers)
+        with open(config_path, "w", encoding="UTF-8") as fd:
+            json.dump(config, fd, indent=2)
 
 
 def install_default_log_config():
@@ -194,7 +185,7 @@ def load_configuration():
         return json.load(f)
 
 
-def post_configure_logging():
+def post_configure_actor_logging():
     """
     Reconfigures all loggers in actor processes.
 

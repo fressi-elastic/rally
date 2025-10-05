@@ -26,6 +26,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import BinaryIO
 
+from esrally import actors
 from esrally.storage._adapter import Head, ServiceUnavailableError
 from esrally.storage._client import Client
 from esrally.storage._config import DEFAULT_STORAGE_CONFIG
@@ -37,7 +38,7 @@ from esrally.storage._range import (
     RangeSet,
     rangeset,
 )
-from esrally.utils import convert, executors, pretty, threads
+from esrally.utils import convert, pretty, threads
 
 LOG = logging.getLogger(__name__)
 
@@ -78,7 +79,6 @@ class Transfer:
         client: Client,
         url: str,
         path: str,
-        executor: executors.Executor,
         document_length: int | None,
         todo: RangeSet = NO_RANGE,
         done: RangeSet = NO_RANGE,
@@ -91,7 +91,6 @@ class Transfer:
         :param client: The client to use to download file parts from a remote service.
         :param url: The URL of the remote file.
         :param path: The path of the local file to write to.
-        :param executor: The executor to use to submit tasks to be executed.
         :param document_length: The number of bytes to read from the remote file and write to the local file.
         :param todo: The set of file ranges to be transferred. In the case of no sets, it will download all the file.
         :param done: The set of file ranges already transferred and to be skip.
@@ -127,7 +126,6 @@ class Transfer:
         self._todo = todo - done
         self._done = done
         self._fds: list[FileDescriptor] = []
-        self._executor = executor
         self._errors: list[Exception] = []
         self._lock = threading.Lock()
         self._resumed_size = 0
@@ -193,7 +191,7 @@ class Transfer:
                 # There are already enough submitted tasks.
                 return False
             # It submits a new task.
-            self._executor.submit(self._run)
+            actors.create_task(self._run())
             return True
 
     def _resume_status(self):
@@ -260,7 +258,7 @@ class Transfer:
         with open(self.path + ".status", "w") as fd:
             json.dump(document, fd)
 
-    def _run(self):
+    async def _run(self):
         """It downloads part of the file."""
         if self._finished:
             # Anything else to do.
@@ -286,8 +284,8 @@ class Transfer:
                     want = Head(ranges=fd.ranges, content_length=fd.ranges.size, document_length=self._document_length, crc32c=self._crc32c)
                 else:
                     want = Head(content_length=self._document_length, crc32c=self._crc32c)
-                got, chunks = self.client.get(self.url, want=want)
-                for chunk in chunks:
+                got, chunks = await self.client.get(self.url, want=want)
+                async for chunk in chunks:
                     try:
                         fd.write(chunk)
                     except StreamClosedError as ex:

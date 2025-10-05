@@ -16,10 +16,11 @@
 # under the License.
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import urllib.parse
-from collections.abc import Iterator, Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 import boto3
@@ -63,12 +64,12 @@ class S3Adapter(Adapter):
         self.aws_profile = aws_profile.strip() or None
         self._s3_client = s3_client
 
-    def head(self, url: str) -> Head:
+    async def head(self, url: str) -> Head:
         address = S3Address.from_url(url)
         res = self._s3.head_object(Bucket=address.bucket, Key=address.key)
         return head_from_response(url, res)
 
-    def get(self, url: str, want: Head | None = None) -> tuple[Head, Iterator[bytes]]:
+    async def get(self, url: str, want: Head | None = None) -> tuple[Head, AsyncIterator[bytes]]:
         headers: dict[str, Any] = {}
         head_to_headers(want, headers)
 
@@ -80,7 +81,13 @@ class S3Adapter(Adapter):
         body: StreamingBody | None = res.get("Body")
         if body is None:
             raise RuntimeError("S3 client returned no body.")
-        return got, body.iter_chunks(self.chunk_size)
+
+        async def _read_chunks() -> AsyncIterator[bytes]:
+            for chunk in body.iter_chunks(self.chunk_size):
+                yield chunk
+                await asyncio.sleep(0)
+
+        return got, _read_chunks()
 
     _s3_client = None
 

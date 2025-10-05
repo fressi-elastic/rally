@@ -21,7 +21,8 @@ import os
 import urllib.parse
 from typing import Any
 
-from esrally.utils import convert, executors
+from esrally import actors
+from esrally.utils import convert
 
 LOG = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ RANDOM_SEED: Any = None
 RESOLVE_TTL: float = 60.0
 
 
-class StorageConfig(executors.ExecutorsConfig):
+class StorageConfig(actors.ActorConfig):
 
     @property
     def adapters(self) -> tuple[str, ...]:

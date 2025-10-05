@@ -17,16 +17,14 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Iterable, Iterator, Mapping
-from concurrent import futures
-from typing import Any, TypeVar
+from collections.abc import AsyncIterator, Iterable, Mapping
+from typing import TypeVar
 
 from typing_extensions import Self
 
 from esrally import types
 from esrally.storage._adapter import Adapter, Head
 from esrally.storage._range import NO_RANGE, RangeSet
-from esrally.utils import executors
 
 
 class DummyAdapter(Adapter):
@@ -39,7 +37,7 @@ class DummyAdapter(Adapter):
         return True
 
     @classmethod
-    def from_config(cls, cfg: types.AnyConfig = None) -> Self:
+    def from_config(cls, cfg: types.Config = None) -> Self:
         return cls()
 
     def __init__(self, heads: Iterable[Head] | None = None, data: Mapping[str, bytes] | None = None) -> None:
@@ -50,13 +48,13 @@ class DummyAdapter(Adapter):
         self.heads: Mapping[str, Head] = {h.url: h for h in heads if h.url is not None}
         self.data: Mapping[str, bytes] = copy.deepcopy(data)
 
-    def head(self, url: str) -> Head:
+    async def head(self, url: str) -> Head:
         try:
             return copy.copy(self.heads[url])
         except KeyError:
             raise FileNotFoundError from None
 
-    def get(self, url: str, want: Head | None = None) -> tuple[Head, Iterator[bytes]]:
+    async def get(self, url: str, want: Head | None = None) -> tuple[Head, AsyncIterator[bytes]]:
         ranges: RangeSet = NO_RANGE
         if want is not None:
             ranges = want.ranges
@@ -67,43 +65,11 @@ class DummyAdapter(Adapter):
         if ranges:
             document_length = len(data)
             data = data[ranges.start : ranges.end]
-        return Head(url, content_length=len(data), ranges=ranges, document_length=document_length), iter([data])
+
+        async def read_data() -> AsyncIterator[bytes]:
+            yield data
+
+        return Head(url, content_length=len(data), ranges=ranges, document_length=document_length), read_data()
 
 
 R = TypeVar("R")
-
-
-class DummyExecutor(executors.Executor):
-
-    def __init__(self):
-        self.tasks: list[executors.Task] | None = []
-
-    def submit(self, fn: Callable, /, *args: Any, **kwargs: Any) -> futures.Future[R]:
-        """Submits a callable to be executed with the given arguments.
-
-        Schedules the callable to be executed as fn(*args, **kwargs).
-        """
-        if self.tasks is None:
-            raise RuntimeError("Executor already closed")
-        future = futures.Future[R]()
-        task = executors.Task[R](fn, args, kwargs, future)
-        self.tasks.append(task)
-        return future
-
-    def execute_tasks(self):
-        if self.tasks is None:
-            raise RuntimeError("Executor already closed")
-        tasks, self.tasks = self.tasks, []
-        for t in tasks:
-            t()
-
-    def shutdown(self):
-        tasks, self.tasks = self.tasks, []
-        self.tasks = None
-        if tasks is not None:
-            for t in tasks:
-                t.handler.cancel()
-
-    @property
-    def max_workers(self) -> int:
-        return 1000

@@ -20,7 +20,7 @@ import datetime
 import importlib
 import logging
 import threading
-from collections.abc import Container, Iterator
+from collections.abc import AsyncIterator, Container
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -75,7 +75,7 @@ class Adapter(Protocol):
         """It returns a canonical URL in case this adapter accepts the URL, None otherwise."""
 
     @classmethod
-    def from_config(cls, cfg: types.AnyConfig) -> Self:
+    def from_config(cls, cfg: types.Config) -> Self:
         """Default `Adapter` objects factory method used to create adapters from `esrally` client.
 
         Default implementation will ignore `cfg` parameter. It can be overridden from `Adapter` implementations that
@@ -85,13 +85,13 @@ class Adapter(Protocol):
         :return: an adapter object.
         """
 
-    def head(self, url: str) -> Head:
+    async def head(self, url: str) -> Head:
         """It gets remote file headers.
         :return: the Head of the remote file.
         :raises ServiceUnavailableError: in case on temporary service failure.
         """
 
-    def get(self, url: str, want: Head | None = None) -> tuple[Head, Iterator[bytes]]:
+    async def get(self, url: str, want: Head | None = None) -> tuple[Head, AsyncIterator[bytes]]:
         """It downloads a remote bucket object to a local file path.
 
         :param url: it represents the URL of the remote file object.
@@ -114,7 +114,7 @@ class AdapterRegistry:
     """AdapterClassRegistry allows to register classes of adapters to be selected according to the target URL."""
 
     @classmethod
-    def from_config(cls, cfg: types.AnyConfig) -> Self:
+    def from_config(cls, cfg: types.Config) -> Self:
         return cls(StorageConfig.from_config(cfg))
 
     def __init__(self, cfg: StorageConfig | None = None) -> None:

@@ -337,6 +337,7 @@ class MechanicActor(actor.RallyActor):
 
     def __init__(self):
         super().__init__()
+        self.cfg: Optional[types.Config] = None
         self.race_control = None
         self.cluster_launcher = None
         self.cluster = None
@@ -365,7 +366,7 @@ class MechanicActor(actor.RallyActor):
         self.logger.error(failmsg)
         self.send(self.race_control, actor.BenchmarkFailure(failmsg))
 
-    @actor.no_retry()
+    @actor.no_retry("mechanic")  # pylint: disable=no-value-for-parameter
     def receiveMsg_StartEngine(self, msg, sender):
         self.logger.info("Received signal from race control to start engine.")
         self.race_control = sender
@@ -398,7 +399,7 @@ class MechanicActor(actor.RallyActor):
             self.status = "starting"
             self.received_responses = []
 
-    @actor.no_retry()
+    @actor.no_retry("mechanic")  # pylint: disable=no-value-for-parameter
     def receiveMsg_NodesStarted(self, msg, sender):
         # Initially the addresses of the children are not
         # known and there is just a None placeholder in the
@@ -410,7 +411,7 @@ class MechanicActor(actor.RallyActor):
 
         self.transition_when_all_children_responded(sender, msg, "starting", "cluster_started", self.on_all_nodes_started)
 
-    @actor.no_retry()
+    @actor.no_retry("mechanic")  # pylint: disable=no-value-for-parameter
     def receiveMsg_ResetRelativeTime(self, msg, sender):
         if msg.reset_in_seconds > 0:
             self.wakeupAfter(msg.reset_in_seconds, payload=MechanicActor.WAKEUP_RESET_RELATIVE_TIME)
@@ -426,7 +427,7 @@ class MechanicActor(actor.RallyActor):
     def receiveMsg_BenchmarkFailure(self, msg, sender):
         self.send(self.race_control, msg)
 
-    @actor.no_retry()
+    @actor.no_retry("mechanic")  # pylint: disable=no-value-for-parameter
     def receiveMsg_StopEngine(self, msg, sender):
         # we might have experienced a launch error or the user has cancelled the benchmark. Hence we need to allow to stop the
         # cluster from various states and we don't check here for a specific one.
@@ -435,7 +436,7 @@ class MechanicActor(actor.RallyActor):
         else:
             self.send_to_children_and_transition(sender, StopNodes(), [], "cluster_stopping")
 
-    @actor.no_retry()
+    @actor.no_retry("mechanic")  # pylint: disable=no-value-for-parameter
     def receiveMsg_NodesStopped(self, msg, sender):
         self.transition_when_all_children_responded(sender, msg, "cluster_stopping", "cluster_stopped", self.on_all_nodes_stopped)
 
@@ -474,7 +475,7 @@ class Dispatcher(actor.RallyActor):
         self.pending = None
         self.remotes = None
 
-    @actor.no_retry()
+    @actor.no_retry("mechanic dispatcher")  # pylint: disable=no-value-for-parameter
     def receiveMsg_StartEngine(self, startmsg, sender):
         self.start_sender = sender
         self.pending = []

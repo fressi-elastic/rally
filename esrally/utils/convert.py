@@ -14,17 +14,10 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-from __future__ import annotations
-
 import enum
-import sys
-
 import math
-import time
 from collections.abc import Callable, Iterable
 from typing import TypeVar
-
-from typing_extensions import Self, TypeAlias
 
 
 class Size(int):
@@ -152,8 +145,8 @@ class Duration(int):
     def to_unit(self, unit: Unit) -> float:
         return float(self / unit)
 
-    def ns(self) -> int:
-        return self
+    def ns(self) -> float:
+        return self.to_unit(Duration.Unit.NS)
 
     def us(self):
         return self.to_unit(Duration.Unit.US)
@@ -200,18 +193,13 @@ class Duration(int):
         return " ".join(parts)
 
 
-MAX_DURATION = Duration(sys.maxsize)
-
-
-AnyDuration: TypeAlias = Duration | float | int
-
-def duration(x: AnyDuration, unit: Duration.Unit = Duration.Unit.S) -> Duration:
+def duration(x: int | float, unit: Duration.Unit = Duration.Unit.S) -> Duration:
     if isinstance(x, Duration):
         return x
     return Duration(x * unit)
 
 
-def seconds_to_ms(x: AnyDuration | None) -> float | None:
+def seconds_to_ms(x: int | float | None) -> float | None:
     if x is None:
         return None
     return duration(x, Duration.Unit.S).ms()
@@ -229,48 +217,6 @@ def ms_to_minutes(x: int | float | None) -> float | None:
     return duration(x, Duration.Unit.MS).m()
 
 
-class Deadline(int):
-
-    @classmethod
-    def now(cls) -> Self:
-        return time.monotonic_ns()
-
-    # def __sub__(self, other: Deadline) -> Duration:
-    #     result = self - other
-    #     return Duration(result)
-    #
-    # def __add__(self, other: Duration) -> Deadline:
-    #     return Deadline(self + other)
-
-
-MAX_DEADLINE = Deadline(sys.maxsize)
-
-
-AnyDeadline = Deadline | float | int
-
-
-def deadline(x: AnyDeadline, unit: Duration.Unit = Duration.Unit.NS) -> Deadline:
-    if isinstance(x, Deadline):
-        return x
-    return Deadline(x * unit)
-
-
-def to_deadline(*timeouts: AnyDuration | None, unit: Duration.Unit = Duration.Unit.NS) -> Deadline:
-    tos = [duration(d, unit) for d in timeouts if d not in [None, MAX_DURATION]]
-    if not tos:
-        return MAX_DEADLINE
-    # Note: duration internally is using nanoseconds integers.
-    return Deadline(Deadline.now() + max(0, min(timeouts)))
-
-
-def time_left(*deadlines: AnyDeadline | None, unit: Duration.Unit = Duration.Unit.NS) -> Duration:
-    deadlines = tuple(deadline(d, unit) for d in deadlines if d not in [None, MAX_DEADLINE])
-    if not deadlines:
-        return MAX_DURATION
-    # Note: duration internally is using nanoseconds integers.
-    return Duration(max(0, min(deadlines) - Deadline.now()))
-
-
 N = TypeVar("N", float, int)
 
 
@@ -284,6 +230,32 @@ def to_bool(value: str | bool) -> bool:
     elif value in ["False", "false", "No", "no", "f", "n", "0", False]:
         return False
     raise ValueError(f"Cannot convert [{value}] to bool.")
+
+
+def to_range(value: str | range | int | None, *, min_value: int | None = None, max_value: int | None = None) -> range:
+    if value is None:
+        start, stop = None, None
+    elif isinstance(value, range):
+        start, stop = value.start, value.stop
+    elif isinstance(value, int):
+        start, stop = value, value + 1
+    elif isinstance(value, str):
+        value = value.replace(" ", "")
+        if "-" in value:
+            start, stop = (int(p) for p in value.split("-", 1))
+        else:
+            start, stop = int(value), int(value) + 1
+    else:
+        raise TypeError(f"Cannot convert [{value}] to range.")
+    start = max(int(v) for v in [start, min_value] if v is not None)
+    stop = min(int(v) for v in [stop, max_value] if v is not None)
+    if start >= stop:
+        raise ValueError("Invalid range: start value must be less than stop value.")
+    return range(start, stop)
+
+
+def to_port_range(value: str | range | int, *, min_value: int = 1, max_value: int = 65535) -> range:
+    return to_range(value, min_value=min_value, max_value=max_value)
 
 
 def to_strings(values: Iterable[str] | None) -> tuple[str, ...]:

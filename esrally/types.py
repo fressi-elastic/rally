@@ -14,20 +14,17 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-from __future__ import annotations
 
-from typing import Any, Literal, Protocol, TypeVar, Union, runtime_checkable
-
-from typing_extensions import Self, TypeAlias
+from typing import Any, Literal, Protocol, runtime_checkable
 
 Section = Literal[
     "actor",
+    "actors",
     "benchmarks",
     "client",
     "defaults",
     "distributions",
     "driver",
-    "executors",
     "generator",
     "mechanic",
     "meta",
@@ -47,13 +44,16 @@ Section = Literal[
     "unit-test",
 ]
 Key = Literal[
-    "actor.admin.port",
-    "actor.coordinator.ip",
-    "actor.coordinator.port",
-    "actor.fallback.system.base",
-    "actor.ip",
     "actor.process.startup.method",
-    "actor.system.base",
+    "actors.admin_ports",
+    "actors.coordinator_ip",
+    "actors.coordinator_port",
+    "actors.external_request_poll_interval",
+    "actors.fallback_system_base",
+    "actors.ip",
+    "actors.process_startup_method",
+    "actors.system_base",
+    "actors.try_join",
     "add.chart_name",
     "add.chart_type",
     "add.config.option",
@@ -99,9 +99,6 @@ Key = Literal[
     "elasticsearch.src.subdir",
     "env.name",
     "exclude.tasks",
-    "executors.forwarder.log.level",
-    "executors.max_workers",
-    "executors.use_threading",
     "format",
     "hosts",
     "include.tasks",
@@ -193,7 +190,6 @@ Key = Literal[
     "user.tags",
     "values",
 ]
-_Config = TypeVar("_Config", bound="Config")
 
 
 @runtime_checkable
@@ -203,7 +199,7 @@ class Config(Protocol):
 
     def add(self, scope, section: Section, key: Key, value: Any) -> None: ...
 
-    def add_all(self, source: _Config, section: Section) -> None: ...
+    def add_all(self, source: "Config", section: Section) -> None: ...
 
     def opts(self, section: Section, key: Key, default_value=None, mandatory: bool = True) -> Any: ...
 
@@ -212,6 +208,3 @@ class Config(Protocol):
     def all_opts(self, section: Section) -> dict: ...
 
     def exists(self, section: Section, key: Key) -> bool: ...
-
-
-AnyConfig: TypeAlias = Union[Config, Self, str, None]

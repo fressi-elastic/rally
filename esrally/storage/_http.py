@@ -14,16 +14,13 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-from __future__ import annotations
-
 import json
 import logging
-from collections.abc import Iterator, Mapping, MutableMapping
+from collections.abc import AsyncIterator, Mapping, MutableMapping
 from datetime import datetime
 from typing import Any
 
-import requests
-import requests.adapters
+import aiohttp
 import urllib3
 from requests.structures import CaseInsensitiveDict
 from typing_extensions import Self
@@ -36,21 +33,6 @@ from esrally.storage._range import NO_RANGE, RangeSet, rangeset
 LOG = logging.getLogger(__name__)
 
 
-class Session(requests.Session):
-
-    @classmethod
-    def from_config(cls, cfg: types.AnyConfig = None) -> Self:
-        cfg = StorageConfig.from_config(cfg)
-        return cls(max_retries=parse_max_retries(cfg.max_retries))
-
-    def __init__(self, max_retries: urllib3.Retry | int | None = None) -> None:
-        super().__init__()
-        if max_retries:
-            adapter = requests.adapters.HTTPAdapter(max_retries=max_retries)
-            self.mount("http://", adapter)
-            self.mount("https://", adapter)
-
-
 class HTTPAdapter(Adapter):
     """It implements the `Adapter` interface for http(s) protocols using the requests library."""
 
@@ -59,36 +41,33 @@ class HTTPAdapter(Adapter):
         return url.startswith("http://") or url.startswith("https://")
 
     @classmethod
-    def from_config(cls, cfg: types.AnyConfig = None) -> Self:
+    def from_config(cls, cfg: types.Config | None = None) -> Self:
         cfg = StorageConfig.from_config(cfg)
-        session = Session.from_config(cfg)
-        return cls(session=session, chunk_size=cfg.chunk_size)
+        return cls(chunk_size=cfg.chunk_size)
 
-    def __init__(self, session: requests.Session | None = None, chunk_size: int = DEFAULT_STORAGE_CONFIG.chunk_size):
-        if session is None:
-            session = requests.Session()
-        self.chunk_size = chunk_size
-        self.session = session
+    def __init__(self, session: aiohttp.ClientSession | None = None, chunk_size: int = DEFAULT_STORAGE_CONFIG.chunk_size):
+        self.session: aiohttp.ClientSession = session or aiohttp.ClientSession()
+        self.chunk_size: int = chunk_size
 
-    def head(self, url: str) -> Head:
-        with self.session.head(url, allow_redirects=True) as res:
-            if res.status_code == 404:
+    async def head(self, url: str) -> Head:
+        async with self.session.head(url, allow_redirects=True) as response:
+            if response.status == 404:
                 raise FileNotFoundError(f"Can't get file head: {url}")
-            res.raise_for_status()
-        return head_from_headers(url, res.headers)
+            response.raise_for_status()
+        return head_from_headers(url, response.headers)
 
-    def get(self, url: str, want: Head | None = None) -> tuple[Head, Iterator[bytes]]:
+    async def get(self, url: str, want: Head | None = None) -> tuple[Head, AsyncIterator[bytes]]:
         headers: MutableMapping[str, str] = CaseInsensitiveDict()
         head_to_headers(want, headers)
-        res = self.session.get(url, stream=True, allow_redirects=True, headers=headers)
-        if res.status_code == 503:
+        response = await self.session.get(url, allow_redirects=True, headers=headers)
+        if response.status == 503:
             raise ServiceUnavailableError()
-        res.raise_for_status()
+        response.raise_for_status()
 
-        got = head_from_headers(url, res.headers)
+        got = head_from_headers(url, response.headers)
         if want is not None:
             want.check(got)
-        return got, res.iter_content(self.chunk_size)
+        return got, response.content.iter_chunked(self.chunk_size)
 
 
 _ACCEPT_RANGES_HEADER = "Accept-Ranges"
