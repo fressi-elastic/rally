@@ -15,27 +15,13 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from thespian.actors import (  # type: ignore[import-untyped]
-    Actor,
-    ActorAddress,
-    ActorExitRequest,
-    ActorSystem,
-    PoisonMessage,
-    WakeupMessage,
-)
+from enum import Enum
 
-from esrally.actors._actor import AsyncActor, get_actor, respond
-from esrally.actors._config import ActorConfig
-from esrally.actors._context import (
-    ActorContext,
-    ActorContextError,
-    create_actor,
-    create_task,
-    get_actor_context,
-    ping,
-    request,
-    send,
-    shutdown,
-    wait_for,
-)
-from esrally.actors._system import SystemBase, get_actor_system, init_actor_system
+
+class OnErrorBehavior(Enum):
+    ABORT = "abort"
+    CONTINUE = "continue"
+    CONTINUE_ON_NETWORK = "continue-on-network"
+
+    def __str__(self):
+        return self.value

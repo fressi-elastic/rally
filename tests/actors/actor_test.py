@@ -46,22 +46,22 @@ def system_base(request) -> Generator[actors.SystemBase]:
 def cfg(system_base: actors.SystemBase) -> Generator[types.Config]:
     cfg = actors.ActorConfig()
     cfg.system_base = system_base
-    cfg.try_join = False
-    config.init_config(cfg)
+    config.init_config(cfg, force=True)
     yield cfg
     config.clear_config()
 
 
 @pytest.fixture(scope="function", autouse=True)
 def system() -> Generator[actors.ActorSystem]:
+    actors.shutdown()
     system = actors.init_actor_system()
     yield system
     actors.shutdown()
 
 
 @pytest.fixture(scope="function")
-def dummy_actor() -> Generator[actors.ActorAddress]:
-    address = actors.create_actor(DummyActor)
+def dummy_actor(event_loop: asyncio.AbstractEventLoop) -> Generator[actors.ActorAddress]:
+    address = event_loop.run_until_complete(actors.create_actor(DummyActor))
     yield address
     actors.send(address, actors.ActorExitRequest())
 
@@ -74,14 +74,13 @@ ExecuteFrom = Literal["from_external", "from_actor"]
 @pytest.fixture(scope="function", params=get_args(ExecuteFrom))
 def execute_from(request, monkeypatch) -> Generator[ExecuteFrom, None, None]:
     if request.param == "from_actor":
-        actor = actors.create_actor(ExecutorActor)
-        request.addfinalizer(lambda: actors.send(actor, actors.ActorExitRequest()))
 
         original_func = getattr(request.module, request.function.__name__)
 
         @functools.wraps(request.function)
         async def func_wrapper(*args, **kwargs):
-            return await actors.request(actor, ExecuteRequest(original_func, args=args, kwargs=kwargs))
+            actor = await actors.create_actor(ExecutorActor, message=ExecuteRequest(original_func, args=args, kwargs=kwargs))
+            request.addfinalizer(lambda: actors.send(actor, actors.ActorExitRequest()))
 
         assert isinstance(request.node, pytest.Function)
         request.node.obj = func_wrapper
@@ -99,47 +98,74 @@ async def test_get_actor_context(execute_from: ExecuteFrom):
         assert not isinstance(ctx, _actor.ActorRequestContext)
         assert isinstance(ctx.handler, actors.ActorSystem)
         assert ctx.handler is actors.get_actor_system()
-        assert str(ctx) == "ActorContext[ActorSystem]", f"invalid value: 'str(ctx)' -> {ctx}"
+        assert ctx.handler is ctx.actor_system
+        assert ctx.details == {"cls": "ActorSystem"}
+        assert str(ctx) == "ActorContext<cls=ActorSystem>", f"invalid value: 'str(ctx)' -> {ctx}"
 
     elif execute_from == "from_actor":
         assert isinstance(ctx, _actor.ActorRequestContext), "Actor request context initialized."
         assert ctx.handler is ctx.actor, "Actor request context initialized."
         assert isinstance(ctx.actor, ExecutorActor), "This is being executed from inside a executor actor."
         assert ctx.actor is actors.get_actor(), "Actor request context initialized."
-        assert ctx.req_id
-        assert ctx.sender is not None
+        assert ctx.req_id, "req_id not set"
+        assert ctx.sender is not None, "sender not set"
         assert not ctx.responded, "Actor request is not responded."
-        actors.respond()
-        assert ctx.responded, "Actor request is responded."
-        assert ctx.pending_tasks == {}
-        assert ctx.name == f"ExecutorActor|{ctx.req_id}"
-        assert str(ctx) == f"ActorContext[ExecutorActor|{ctx.req_id}]", f"invalid value: 'str(ctx)' -> {ctx}"
+        assert ctx.pending_tasks.get(ctx.req_id), "test method has no tasks"
+        assert ctx.details == {
+            "cls": "ExecutorActor",
+            "req_id": ctx.req_id,
+            "sender": ctx.sender,
+            "address": ctx.actor.myAddress,
+        }, f"Invalid actor context details: {ctx.details}"
+        assert ctx.details["cls"] == ExecutorActor.__name__
+        assert (
+            str(ctx) == f"ActorRequestContext<address={ctx.actor.myAddress}, cls=ExecutorActor, req_id={ctx.req_id}, sender={ctx.sender}>"
+        ), f"invalid value: 'str(ctx)' -> {ctx}"
 
     else:
         raise NotImplementedError()
 
 
+def test_ask_result(system: actors.ActorSystem, dummy_actor: actors.ActorAddress) -> None:
+    """It tests ask function receives a result from remote actor."""
+    result = random.random()
+    assert result == system.ask(dummy_actor, ResponseRequest(result))
+
+
+def test_ask_poison(system: actors.ActorSystem, dummy_actor: actors.ActorAddress) -> None:
+    """It tests request function raises an error that has been captured while processing request."""
+    error = RuntimeError(f"some ramdom error: {random.random()}")
+    response = system.ask(dummy_actor, ResponseRequest(error=error))
+    assert isinstance(response, actors.PoisonMessage)
+    assert isinstance(response.poisonMessage, ResponseRequest)
+    assert str(response.poisonMessage.error) == str(error)
+
+
 @pytest.mark.asyncio
-async def test_return_result(dummy_actor: actors.ActorAddress) -> None:
+async def test_request_result(execute_from: ExecuteFrom, dummy_actor: actors.ActorAddress) -> None:
+    """It tests request function receives a result from remote actor."""
     result = random.random()
     assert result == await actors.request(dummy_actor, ResponseRequest(result))
 
 
 @pytest.mark.asyncio
-async def test_respond_status(dummy_actor: actors.ActorAddress) -> None:
+async def test_request_respond(execute_from: ExecuteFrom, dummy_actor: actors.ActorAddress) -> None:
+    """It tests request function receives a result when actor responds using actors.respond function."""
     result = random.random()
     assert result == await actors.request(dummy_actor, ResponseRequest(result, explicit=True))
 
 
 @pytest.mark.asyncio
-async def test_raises_error(dummy_actor: actors.ActorAddress) -> None:
+async def test_request_raises(execute_from: ExecuteFrom, dummy_actor: actors.ActorAddress) -> None:
+    """It tests request function raises an error that has been captured while processing request."""
     error = RuntimeError(f"some ramdom error: {random.random()}")
     with pytest.raises(RuntimeError):
         await actors.request(dummy_actor, ResponseRequest(error=error))
 
 
 @pytest.mark.asyncio
-async def test_respond_error(dummy_actor: actors.ActorAddress) -> None:
+async def test_request_respond_error(execute_from: ExecuteFrom, dummy_actor: actors.ActorAddress) -> None:
+    """It tests request function raises an error that has been sent using respond function."""
     error = ValueError(f"some ramdom error: {random.random()}")
     with pytest.raises(ValueError):
         await actors.request(dummy_actor, ResponseRequest(error=error, explicit=True))
@@ -200,9 +226,8 @@ async def test_request(execute_from: ExecuteFrom, dummy_actor: actors.ActorAddre
 
     request = _proto.PingRequest(message=random.random())
     future = actors.request(dummy_actor, request)
-    if execute_from == "from_actor":
-        assert not future.done()
-        assert len(ctx.pending_results) == 1
+    assert not future.done()
+    assert len(ctx.pending_results) == 1
 
     response = await future
     assert response == request.message
@@ -214,7 +239,7 @@ async def test_create_actor(execute_from: ExecuteFrom) -> None:
     # It uses this special configuration object to check it is going to be propagated to child actor as it is.
     special_config = actors.ActorConfig()
     special_config.admin_ports = range(100, 200)
-    actor_address = actors.create_actor(DummyActor, cfg=special_config)
+    actor_address = await actors.create_actor(DummyActor, cfg=special_config)
     try:
         actor_config = await actors.request(actor_address, GetConfigRequest())
         assert isinstance(actor_config, ActorConfig)
@@ -246,9 +271,9 @@ async def test_create_task(case: CreateTaskCase, execute_from: ExecuteFrom) -> N
     assert not task.done()
 
     if case.task_name is None:
-        assert task.get_name() == f"{coro}@{actors.get_actor_context().name}", f"unexpected task name: {task.get_name()}"
+        assert task.get_name() == f"{coro}@{actors.get_actor_context().handler}", f"unexpected task name: {task.get_name()}"
     else:
-        assert task.get_name() == f"{case.task_name}@{actors.get_actor_context().name}", f"unexpected task name: {task.get_name()}"
+        assert task.get_name() == f"{case.task_name}@{actors.get_actor_context().handler}", f"unexpected task name: {task.get_name()}"
 
     if execute_from == "from_actor":
         ctx = actors.get_actor_context()

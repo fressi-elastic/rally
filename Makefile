@@ -79,7 +79,7 @@ check-all: all
 # It checks uv is installed.
 uv:
 	@if [[ ! -x $$(command -v uv) ]]; then \
-		printf "Please install uv by running the following outside of a virtual env: [ curl -LsSf https://astral.sh/uv/install.sh | $(SHELL) ]\n"; \
+		printf "Please install uv by running the following outside of a virtual environment (https://docs.astral.sh/uv/getting-started/installation/)"; \
 	fi
 
 # It adds a list of packages to the project.
@@ -172,7 +172,7 @@ clean-docs: venv
 
 # It runs unit tests using the default python interpreter version.
 test: venv
-	uv run -- pytest -s $(or $(ARGS), tests/)
+	uv run -- pytest -s --full-trace $(or $(ARGS), tests/)
 
 # It runs unit tests using all supported python versions.
 test-all: test-3.10 test-3.11 test-3.12 test-3.13

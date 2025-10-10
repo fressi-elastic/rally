@@ -14,10 +14,11 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+import itertools
 import logging
 import os
 import socket
-from collections.abc import Generator, Iterable
+from collections.abc import Iterable
 from typing import Any, get_args
 
 from thespian import actors  # type: ignore[import-untyped]
@@ -26,26 +27,51 @@ from thespian.system.logdirector import (  # type: ignore[import-untyped]
 )
 
 from esrally import log, types
-from esrally.actors._config import ActorConfig, ProcessStartupMethod, SystemBase
+from esrally.actors._config import (
+    DEFAULT_COORDINATOR_IP,
+    DEFAULT_IP,
+    ActorConfig,
+    SystemBase,
+)
 from esrally.actors._context import (
     ActorContext,
     ActorContextError,
     get_actor_context,
     set_actor_context,
 )
-from esrally.utils import net
 
 LOG = logging.getLogger(__name__)
 
 
 def get_actor_system() -> actors.ActorSystem:
-    system = get_actor_context().handler
-    if not isinstance(system, actors.ActorSystem):
-        raise ActorContextError("Context handler is not an ActorSystem")
-    return system
+    """It returns the last actor system initialized using init_actor_system()"""
+    return get_actor_context().actor_system
 
 
 def init_actor_system(cfg: types.Config | None = None) -> actors.ActorSystem:
+    """It initializes the actor system using given configuration.
+
+    To provide a custom configuration create and customize one with ActorConfig class. Example:
+
+        cfg = ActorConfig.from_config()
+        cfg.system_base = "multiprocTCPBase"
+        cfg.admin_ports = "1900"
+        system = actors.init_actor_system(cfg)
+
+    After the actor system is initialized, the actor system reference will be available using get_actor_system()
+    function. For creating actors and sending messages, you can then use `create_actor`, `send` and `request` global
+    functions.
+
+        address = actors.create_actor(MyActorClass)
+        response = await actors.request(address, MyRequest())
+
+    To finally shut down the actor system, use the `shutdown` function.
+
+        actors.shutdown()
+
+    :param cfg: Optional configuration object.
+    :return: An initialized actor system
+    """
     try:
         system = get_actor_system()
     except ActorContextError:
@@ -58,27 +84,35 @@ def init_actor_system(cfg: types.Config | None = None) -> actors.ActorSystem:
     ctx = context_from_config(cfg)
     if not isinstance(ctx.handler, actors.ActorSystem):
         raise ActorContextError("Context handler is not an ActorSystem")
+
+    # if sys.platform == "darwin" and sys.version_info < (3, 12):
+    #     selectors.DefaultSelector = selectors.SelectSelector
+
     set_actor_context(ctx)
     LOG.info("Actor system initialized.")
     return ctx.handler
 
 
 def context_from_config(cfg: types.Config | None = None) -> ActorContext:
+    """Creates a new actor context, with its actor system, from given configuration.
+
+    :param cfg: configuration object to be used.
+    :return: Created actor context.
+    """
     cfg = ActorConfig.from_config(cfg)
+
+    # It will try configured system base first, fall back one later, if different.
     system_bases = [cfg.system_base]
-    if cfg.fallback_system_base and cfg.fallback_system_base != cfg.system_base:
+    if cfg.fallback_system_base not in system_bases:
         system_bases.append(cfg.fallback_system_base)
 
     first_error: Exception | None = None
     for system_base in system_bases:
-        admin_ports: Iterable[int | None]
-        if system_base == "multiprocTCPBase":
-            if cfg.try_join:
-                admin_ports = cfg.admin_ports
-            else:
-                admin_ports = iter_unused_random_ports()
-        else:
-            admin_ports = [None]
+
+        admin_ports: Iterable[int | None] = [None]
+        if system_base == "multiprocTCPBase" and cfg.admin_ports:
+            # It will try using provided ports first, then a random one as fallback in case of issues.
+            admin_ports = itertools.chain(cfg.admin_ports, admin_ports)
 
         for admin_port in admin_ports:
             try:
@@ -87,11 +121,10 @@ def context_from_config(cfg: types.Config | None = None) -> ActorContext:
                     ip=cfg.ip,
                     admin_port=admin_port,
                     coordinator_ip=cfg.coordinator_ip,
-                    coordinator_port=cfg.coordinator_port,
                     process_startup_method=cfg.process_startup_method,
                 )
-                return ActorContext(handler=system, external_request_poll_interval=cfg.external_request_poll_interval)
             except actors.InvalidActorAddress as ex:
+
                 first_error = first_error or ex
                 if admin_port is not None:
                     LOG.exception("Failed setting up actor system with system base '%s' and admin port %s", system_base, admin_port)
@@ -102,49 +135,62 @@ def context_from_config(cfg: types.Config | None = None) -> ActorContext:
                 first_error = first_error or ex
                 break  # It tries the next system base
 
+            # It succeeded crating an actor system. The configuration passed to the context will be forwarded to all
+            # actors created within this context.
+            return ActorContext(handler=system, cfg=cfg)
+
     raise first_error or RuntimeError(f"Could not initialize actor system with system base '{cfg.system_base}'")
 
 
 def create_system(
-    system_base: SystemBase | None = None,
-    ip: str | None = None,
+    system_base: SystemBase = "multiprocTCPBase",
+    ip: str = "127.0.0.1",
     admin_port: int | None = None,
     coordinator_ip: str | None = None,
-    coordinator_port: int | None = None,
     process_startup_method: str | None = None,
 ) -> actors.ActorSystem:
-    if system_base and system_base not in get_args(SystemBase):
+    """It creates a new actor system using given configuration.
+
+    :param system_base:
+    :param ip:
+    :param admin_port:
+    :param coordinator_ip:
+    :param process_startup_method:
+    :return: the new actor system from Thespian.
+    """
+    if system_base not in get_args(SystemBase):
         raise ValueError(f"invalid system base value: '{system_base}', valid options are: {get_args(SystemBase)}")
 
     capabilities: dict[str, Any] = {"coordinator": True}
-    if system_base in ("multiprocTCPBase", "multiprocUDPBase"):
-        proto = {"multiprocTCPBase": socket.IPPROTO_TCP, "multiprocUDPBase": socket.IPPROTO_UDP}[system_base]
-        if ip:
-            ip, admin_port = net.resolve(ip, port=admin_port, proto=proto)
-            capabilities["ip"] = ip
+    if system_base == "multiprocTCPBase":
+        ip = ip or DEFAULT_IP
+        try:
+            capabilities["ip"] = ip = resolve(ip)
+        except Exception:
+            LOG.error("Failed to resolve actor system IP address '%s', using 127.0.0.1.", ip)
+            ip = DEFAULT_IP
+        assert ip
 
-        if admin_port:
-            capabilities["Admin Port"] = admin_port
+        admin_port = admin_port or find_unused_random_port(ip)
+        assert admin_port
+
+        capabilities["Admin Port"] = admin_port
 
         if coordinator_ip:
-            coordinator_ip, coordinator_port = net.resolve(coordinator_ip, coordinator_port)
-            if coordinator_port:
-                coordinator_port = int(coordinator_port)
-                if coordinator_port:
-                    coordinator_ip += f":{coordinator_port}"
+            try:
+                coordinator_ip = resolve(coordinator_ip)
+            except Exception:
+                coordinator_ip = DEFAULT_COORDINATOR_IP
             capabilities["Convention Address.IPv4"] = coordinator_ip
             if ip and coordinator_ip != ip:
                 capabilities["coordinator"] = False
 
-        if process_startup_method not in get_args(ProcessStartupMethod):
-            raise ValueError(
-                f"invalid process startup method value: '{process_startup_method}', valid options are: " f"{get_args(ProcessStartupMethod)}"
-            )
-        if process_startup_method is not None:
+        if process_startup_method:
             capabilities["Process Startup Method"] = process_startup_method
 
     if system_base == "multiprocQueueBase":
-        capabilities["Process Startup Method"] = "spawn"
+        if process_startup_method:
+            capabilities["Process Startup Method"] = process_startup_method
 
     log_defs = None
     if not isinstance(logging.root, ThespianLogForwarder):
@@ -164,9 +210,21 @@ def create_system(
     return system
 
 
-def iter_unused_random_ports() -> Generator[int]:
-    while True:
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            _, port = sock.getsockname()
-        yield port
+def resolve(address: str, port: int | None = None) -> str:
+    addrinfo = socket.getaddrinfo(address, port or 1900, 0, 0, socket.IPPROTO_TCP)
+    for family, _, _, _, sockaddr in addrinfo:
+        # We're interested in the IPv4 address
+        if family == socket.AddressFamily.AF_INET:
+            ip, _ = sockaddr[:2]
+            return str(ip)
+    raise ValueError(f"Invalid hostname or ip address: '{address}'")
+
+
+def find_unused_random_port(ip: str) -> int:
+    with socket.socket() as sock:
+        try:
+            sock.bind((ip, 0))
+        except OSError:
+            sock.bind(("0.0.0.0", 0))
+        _, port = sock.getsockname()
+    return port
