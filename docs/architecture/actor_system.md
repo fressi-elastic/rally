@@ -134,3 +134,7 @@ sequenceDiagram
     DriverActor -->> BenchmarkActor: BenchmarkComplete
     BenchmarkActor ->> BenchmarkCoordinator: on_benchmark_complete()
 ```
+
+## Related documentation
+
+- [Sample flow](sample_flow.rst) — Where sample objects are created, sent between actors, consumed, and how they are turned into metrics.

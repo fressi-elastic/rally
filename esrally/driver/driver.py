@@ -23,14 +23,16 @@ import itertools
 import logging
 import math
 import multiprocessing
+import pickle
 import queue
 import sys
 import threading
 import time
-from dataclasses import dataclass
+import zlib
+from dataclasses import dataclass, field
 from enum import Enum
 from io import BytesIO
-from typing import Callable, Optional
+from typing import Any, Callable
 
 import thespian.actors
 
@@ -58,61 +60,72 @@ from esrally.utils.error_behavior import OnErrorBehavior
 # Messages sent between drivers
 #
 ##################################
+@dataclass(frozen=True)
 class PrepareBenchmark:
     """
     Initiates preparation steps for a benchmark. The benchmark should only be started after StartBenchmark is sent.
     """
 
-    def __init__(self, config: types.Config, track):
-        """
-        :param config: Rally internal configuration object.
-        :param track: The track to use.
-        """
-        self.config = config
-        self.track = track
+    # Rally internal configuration object.
+    config: types.Config
+
+    # The track to use for the benchmark.
+    track: Any
 
 
+@dataclass(frozen=True)
 class StartBenchmark:
-    pass
+    """Signals that the benchmark should start (sent after preparation is complete)."""
 
 
+@dataclass(frozen=True)
 class Bootstrap:
     """
-    Prompts loading of track code on new actors
+    Prompts loading of track code on new actors.
     """
 
-    def __init__(self, cfg: types.Config, worker_id=None):
-        self.config = cfg
-        self.worker_id = worker_id
+    # Rally internal configuration object (serialized for the remote actor).
+    config: types.Config
+
+    # Unique (numeric) id of the worker, or None if not yet assigned.
+    worker_id: int | None = None
 
 
+@dataclass(frozen=True)
 class PrepareTrack:
     """
-    Initiates preparation of a track.
-
+    Initiates preparation of a track on load driver hosts.
     """
 
-    def __init__(self, track):
-        """
-        :param track: The track to use.
-        """
-        self.track = track
+    # The track to use.
+    track: Any
 
 
+@dataclass(frozen=True)
 class TrackPrepared:
-    pass
+    """Sent when track preparation is complete on a host."""
 
 
+@dataclass(frozen=True)
 class StartTaskLoop:
-    def __init__(self, track_name, cfg: types.Config):
-        self.track_name = track_name
-        self.cfg = cfg
+    """Starts the task execution loop on a track preparator actor."""
+
+    # Name of the track.
+    track_name: str
+
+    # Rally internal configuration object.
+    cfg: types.Config
 
 
+@dataclass(frozen=True)
 class DoTask:
-    def __init__(self, task, cfg: types.Config):
-        self.task = task
-        self.cfg = cfg
+    """Unit of work sent to a task execution actor."""
+
+    # The task to execute.
+    task: Any
+
+    # Rally internal configuration object.
+    cfg: types.Config
 
 
 @dataclass(frozen=True)
@@ -125,98 +138,143 @@ class WorkerTask:
     params: dict
 
 
+@dataclass(frozen=True)
 class ReadyForWork:
-    pass
+    """Sent by a task execution actor when it is ready to receive work."""
 
 
+@dataclass(frozen=True)
 class WorkerIdle:
-    pass
+    """Sent when a worker has finished its current task and is idle."""
 
 
+@dataclass(frozen=True)
 class PreparationComplete:
-    def __init__(self, distribution_flavor, distribution_version, revision):
-        self.distribution_flavor = distribution_flavor
-        self.distribution_version = distribution_version
-        self.revision = revision
+    """Sent when the mechanic has prepared the cluster and the driver can start the benchmark."""
+
+    # Elasticsearch distribution flavor (e.g. 'elasticsearch', 'default').
+    distribution_flavor: str
+
+    # Version string of the distribution.
+    distribution_version: str
+
+    # Revision or build identifier of the distribution.
+    revision: str
 
 
+@dataclass(frozen=True)
 class StartWorker:
     """
-    Starts a worker.
+    Starts a worker. Sent by the driver after creating the worker actor.
     """
 
-    def __init__(self, worker_id, config: types.Config, track, client_allocations, client_contexts):
-        """
-        :param worker_id: Unique (numeric) id of the worker.
-        :param config: Rally internal configuration object.
-        :param track: The track to use.
-        :param client_allocations: A structure describing which clients need to run which tasks.
-        :param client_contexts: A dict ``ClientContext`` objects keyed by client ID
-        """
-        self.worker_id = worker_id
-        self.config = config
-        self.track = track
-        self.client_allocations = client_allocations
-        self.client_contexts = client_contexts
+    # Unique (numeric) id of the worker.
+    worker_id: int
+
+    # Rally internal configuration object.
+    config: types.Config
+
+    # The track to use.
+    track: Any
+
+    # Structure describing which clients need to run which tasks (ClientAllocations).
+    client_allocations: Any
+
+    # Dict of ClientContext objects keyed by client ID.
+    client_contexts: dict[int, "ClientContext"]
+
+    # When using Elasticsearch metrics store, context for workers to open their own store. None for in-memory.
+    open_metrics_context: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
 class Drive:
     """
     Tells a load generator to drive (either after a join point or initially).
     """
 
-    def __init__(self, client_start_timestamp):
-        self.client_start_timestamp = client_start_timestamp
+    # Timestamp (perf_counter) at which the worker should start or continue driving.
+    client_start_timestamp: float
 
 
+@dataclass(frozen=True)
 class CompleteCurrentTask:
     """
-    Tells a load generator to prematurely complete its current task. This is used to model task dependencies for parallel tasks (i.e. if a
-    specific task that is marked accordingly in the track finishes, it will also signal termination of all other tasks in the same parallel
-    element).
+    Tells a load generator to prematurely complete its current task. Used to model task dependencies of parallel tasks
+    (e.g. when one task is marked as completing the parent, it signals all workers to finish their current task).
     """
 
 
+@dataclass(frozen=True)
 class UpdateSamples:
     """
-    Used to send samples from a load generator node to the master.
+    Sent from a worker to the driver with request samples collected since the last update.
     """
 
-    def __init__(self, client_id, samples):
-        self.client_id = client_id
-        self.samples = samples
+    # Id of the worker that produced these samples.
+    worker_id: int
+
+    # List of Sample objects (latency, throughput, etc.) to be post-processed by the driver.
+    samples: list[Any]
 
 
+@dataclass(frozen=True)
 class JoinPointReached:
     """
-    Tells the master that a load generator has reached a join point. Used for coordination across multiple load generators.
+    Tells the master that a load generator has reached a join point. Used for coordination across multiple workers.
     """
 
-    def __init__(self, worker_id, task):
-        self.worker_id = worker_id
-        # Using perf_counter here is fine even in the distributed case. Although we "leak" this value to other
-        # machines, we will only ever interpret this value on the same machine (see `Drive` and the implementation
-        # in `Driver#joinpoint_reached()`).
-        self.worker_timestamp = time.perf_counter()
-        self.task = task
+    # Id of the worker that reached the join point.
+    worker_id: int
+
+    # Task allocations for the current step (list of ClientAllocation). Set by sender.
+    task: list[Any]
+
+    # Local perf_counter when the worker reached the join point. Only interpreted on the worker's machine.
+    worker_timestamp: float = field(default_factory=time.perf_counter)
 
 
+@dataclass(frozen=True)
 class BenchmarkComplete:
     """
-    Indicates that the benchmark is complete.
+    Indicates that the benchmark is complete. Sent by the driver to the benchmark actor.
     """
 
-    def __init__(self, metrics):
-        self.metrics = metrics
+    # Serialized metrics (memento) to add to the coordinator store, or None when using ES store (workers wrote directly).
+    metrics: bytes | None
 
 
+@dataclass(frozen=True)
 class TaskFinished:
-    def __init__(self, metrics, next_task_scheduled_in):
-        self.metrics = metrics
-        self.next_task_scheduled_in = next_task_scheduled_in
+    """Sent by the driver after each task step; carries metrics for that step and the delay until the next step."""
+
+    # Serialized metrics (memento) for this step, or None when using ES store (workers wrote directly).
+    metrics: bytes | None
+
+    # Seconds to wait before starting the next task (0 for immediate).
+    next_task_scheduled_in: float
 
 
-class DriverActor(actor.RallyActor):
+@dataclass(frozen=True)
+class WriteMetricsToStore:
+    """
+    Tells a worker to write a chunk of metrics to the metrics store. Used when reporting uses Elasticsearch
+    so workers perform the write instead of the driver (avoids driver bottleneck).
+    """
+
+    # Compressed, pickled list of metrics documents to bulk_add and flush to the store.
+    memento: bytes
+
+
+@dataclass(frozen=True)
+class WriteMetricsToStoreAck:
+    """
+    Worker acknowledges it has written its metrics chunk to the store. Driver uses this to know when the
+    final batch is fully written before completing the benchmark.
+    """
+
+
+class DriverActor(actor.RallyActor):  # pylint: disable=too-many-public-methods
     RESET_RELATIVE_TIME_MARKER = "reset_relative_time"
 
     WAKEUP_INTERVAL_SECONDS = 1
@@ -305,16 +363,22 @@ class DriverActor(actor.RallyActor):
             if self.post_process_timer >= DriverActor.POST_PROCESS_INTERVAL_SECONDS:
                 self.post_process_timer = 0
                 self.driver.post_process_samples()
+                if self.driver.reporting_datastore_type == "elasticsearch":
+                    self.driver.distribute_metrics_to_workers(final_batch=False)
             self.driver.update_progress_message()
             self.wakeupAfter(datetime.timedelta(seconds=DriverActor.WAKEUP_INTERVAL_SECONDS))
+
+    @actor.no_retry("driver")  # pylint: disable=no-value-for-parameter
+    def receiveMsg_WriteMetricsToStoreAck(self, msg, sender):
+        self.driver.on_metrics_write_ack(sender)
 
     def create_client(self, host, cfg: types.Config, worker_id):
         worker = self.createActor(Worker, targetActorRequirements=self._requirements(host))
         self.send(worker, Bootstrap(cfg, worker_id))
         return worker
 
-    def start_worker(self, driver, worker_id, cfg: types.Config, track, allocations, client_contexts=None):
-        self.send(driver, StartWorker(worker_id, cfg, track, allocations, client_contexts))
+    def start_worker(self, driver, worker_id, cfg: types.Config, track, allocations, client_contexts=None, open_metrics_context=None):
+        self.send(driver, StartWorker(worker_id, cfg, track, allocations, client_contexts, open_metrics_context))
 
     def drive_at(self, driver, client_start_timestamp):
         self.send(driver, Drive(client_start_timestamp))
@@ -406,7 +470,7 @@ class TaskExecutionActor(actor.RallyActor):
         self.task_preparation_actor = None
         self.logger = logging.getLogger(__name__)
         self.track_name = None
-        self.cfg: Optional[types.Config] = None
+        self.cfg: types.Config | None = None
 
     @actor.no_retry("task executor")  # pylint: disable=no-value-for-parameter
     def receiveMsg_StartTaskLoop(self, msg, sender):
@@ -473,7 +537,7 @@ class TrackPreparationActor(actor.RallyActor):
         self.status = self.Status.INITIALIZING
         self.children = []
         self.tasks = []
-        self.cfg: Optional[types.Config] = None
+        self.cfg: types.Config | None = None
         self.data_root_dir = None
         self.track = None
 
@@ -565,7 +629,7 @@ ApiKey = collections.namedtuple("ApiKey", ["id", "secret"])
 class ClientContext:
     client_id: int
     parent_worker_id: int
-    api_key: Optional[ApiKey] = None
+    api_key: ApiKey | None = None
 
 
 class Driver:
@@ -609,6 +673,9 @@ class Driver:
         self.complete_current_task_sent = False
 
         self.telemetry = None
+        self.reporting_datastore_type = None
+        self._pending_metrics_acks = None
+        self._metrics_final_batch = False
 
     def create_es_clients(self):
         all_hosts = self.config.opts("client", "hosts").all_hosts
@@ -706,7 +773,18 @@ class Driver:
         self.challenge = select_challenge(self.config, self.track)
         self.quiet = self.config.opts("system", "quiet.mode", mandatory=False, default_value=False)
         downsample_factor = int(self.config.opts("reporting", "metrics.request.downsample.factor", mandatory=False, default_value=1))
-        self.metrics_store = metrics.metrics_store(cfg=self.config, track=self.track.name, challenge=self.challenge.name, read_only=False)
+        self.reporting_datastore_type = self.config.opts("reporting", "datastore.type")
+        # Use InMemoryMetricsStore for request metrics so we can get docs and either
+        # distribute to workers (ES) or send to coordinator (in-memory)
+        self.metrics_store = metrics.InMemoryMetricsStore(cfg=self.config)
+        self.metrics_store.open(
+            race_id=self.config.opts("system", "race.id"),
+            race_timestamp=self.config.opts("system", "time.start"),
+            track_name=self.track.name,
+            challenge_name=self.challenge.name,
+            car_name=self.config.opts("mechanic", "car.names"),
+            create=True,
+        )
 
         self.sample_post_processor = SamplePostprocessor(
             self.metrics_store, downsample_factor, self.track.meta_data, self.challenge.meta_data
@@ -811,8 +889,15 @@ class Driver:
 
                         worker_client_contexts[client_id] = client_context
                         self.client_contexts[worker_id] = worker_client_contexts
+                    open_metrics_context = self.metrics_store.open_context if self.reporting_datastore_type == "elasticsearch" else None
                     self.driver_actor.start_worker(
-                        worker, worker_id, self.config, self.track, client_allocations, client_contexts=worker_client_contexts
+                        worker,
+                        worker_id,
+                        self.config,
+                        self.track,
+                        client_allocations,
+                        client_contexts=worker_client_contexts,
+                        open_metrics_context=open_metrics_context,
                     )
                     self.workers.append(worker)
                     worker_id += 1
@@ -847,24 +932,14 @@ class Driver:
             if self.finished():
                 self.telemetry.on_benchmark_stop()
                 self.logger.info("All steps completed.")
-                # Some metrics store implementations return None because no external representation is required.
-                # pylint: disable=assignment-from-none
-                m = self.metrics_store.to_externalizable(clear=True)
-                self.logger.debug("Closing metrics store...")
-                self.metrics_store.close()
-                # immediately clear as we don't need it anymore and it can consume a significant amount of memory
-                self.metrics_store = None
-                if self.generated_api_key_ids:
-                    self.logger.debug("Deleting auto-generated client API keys...")
-                    try:
-                        delete_api_keys(self.default_sync_es_client, self.generated_api_key_ids)
-                    except exceptions.RallyError:
-                        console.warn(
-                            "Unable to delete auto-generated API keys. You may need to manually delete them. "
-                            "Please check the logs for details."
-                        )
-                self.logger.debug("Sending benchmark results...")
-                self.driver_actor.on_benchmark_complete(m)
+                if self.reporting_datastore_type == "elasticsearch":
+                    # Workers write to the metrics store; wait for their acks before completing
+                    self.distribute_metrics_to_workers(final_batch=True)
+                    if not self._pending_metrics_acks:
+                        self._complete_benchmark_and_notify(None)
+                else:
+                    m = self.metrics_store.to_externalizable(clear=True)
+                    self._complete_benchmark_and_notify(m)
             else:
                 self.move_to_next_task(workers_curr_step)
         else:
@@ -880,9 +955,11 @@ class Driver:
             # Assumption: We don't have a lot of clock skew between reaching the join point and sending the next task
             #             (it doesn't matter too much if we're a few ms off).
             waiting_period = 1.0
-        # Some metrics store implementations return None because no external representation is required.
-        # pylint: disable=assignment-from-none
-        m = self.metrics_store.to_externalizable(clear=True)
+        if self.reporting_datastore_type == "elasticsearch":
+            self.distribute_metrics_to_workers(final_batch=False)
+            m = None
+        else:
+            m = self.metrics_store.to_externalizable(clear=True)
         self.driver_actor.on_task_finished(m, waiting_period)
         # Using a perf_counter here is fine also in the distributed case as we subtract it from `master_received_msg_at` making it
         # a relative instead of an absolute value.
@@ -969,6 +1046,23 @@ class Driver:
     def finished(self):
         return self.current_step == self.number_of_steps
 
+    def _complete_benchmark_and_notify(self, metrics_memento):
+        """Close metrics store, clean up API keys, and notify benchmark actor of completion."""
+        self.logger.debug("Closing metrics store...")
+        if self.metrics_store and self.metrics_store.opened:
+            self.metrics_store.close()
+        self.metrics_store = None
+        if self.generated_api_key_ids:
+            self.logger.debug("Deleting auto-generated client API keys...")
+            try:
+                delete_api_keys(self.default_sync_es_client, self.generated_api_key_ids)
+            except exceptions.RallyError:
+                console.warn(
+                    "Unable to delete auto-generated API keys. You may need to manually delete them. Please check the logs for details."
+                )
+        self.logger.debug("Sending benchmark results...")
+        self.driver_actor.on_benchmark_complete(metrics_memento)
+
     def close(self):
         self.progress_reporter.finish()
         if self.metrics_store and self.metrics_store.opened:
@@ -1006,7 +1100,50 @@ class Driver:
         # only a snapshot and that new data will go to a new sample set.
         raw_samples = self.raw_samples
         self.raw_samples = []
-        self.sample_post_processor(raw_samples)
+        # When using ES metrics store, workers write their own per-sample metrics; Driver only produces global throughput.
+        throughput_only = self.reporting_datastore_type == "elasticsearch"
+        self.sample_post_processor(raw_samples, throughput_only=throughput_only)
+
+    def distribute_metrics_to_workers(self, final_batch=False):
+        """
+        When using Elasticsearch metrics store, partition post-processed docs across workers
+        so they write to the store instead of the driver (avoids driver bottleneck).
+        """
+        if self.reporting_datastore_type != "elasticsearch" or not self.workers or not self.metrics_store:
+            return
+        m = self.metrics_store.to_externalizable(clear=True)
+        if not m:
+            if final_batch:
+                self._pending_metrics_acks = None
+                self._metrics_final_batch = False
+                self.driver_actor.on_benchmark_complete(None)
+            return
+        docs = pickle.loads(zlib.decompress(m))
+        if not docs:
+            if final_batch:
+                self._pending_metrics_acks = None
+                self._metrics_final_batch = False
+                self.driver_actor.on_benchmark_complete(None)
+            return
+        num_workers = len(self.workers)
+        chunk_size = max(1, (len(docs) + num_workers - 1) // num_workers)
+        for i, worker in enumerate(self.workers):
+            chunk = docs[i * chunk_size : (i + 1) * chunk_size]
+            memento = zlib.compress(pickle.dumps(chunk))
+            self.driver_actor.send(worker, WriteMetricsToStore(memento))
+        if final_batch:
+            self._pending_metrics_acks = set(self.workers)
+            self._metrics_final_batch = True
+
+    def on_metrics_write_ack(self, worker):
+        """Called when a worker has finished writing its metrics chunk (ES store only)."""
+        if self._pending_metrics_acks is None:
+            return
+        self._pending_metrics_acks.discard(worker)
+        if not self._pending_metrics_acks and self._metrics_final_batch:
+            self._pending_metrics_acks = None
+            self._metrics_final_batch = False
+            self._complete_benchmark_and_notify(None)
 
 
 class SamplePostprocessor:
@@ -1018,81 +1155,87 @@ class SamplePostprocessor:
         self.throughput_calculator = ThroughputCalculator()
         self.downsample_factor = downsample_factor
 
-    def __call__(self, raw_samples):
+    def __call__(self, raw_samples, throughput_only=False):
+        """
+        Post-process raw samples into metrics (latency, service_time, processing_time, throughput).
+        When throughput_only is True (used by Driver with ES store), only throughput is written;
+        per-sample metrics are written by Workers to their local store.
+        """
         if len(raw_samples) == 0:
             return
         total_start = time.perf_counter()
         start = total_start
         final_sample_count = 0
-        for idx, sample in enumerate(raw_samples):
-            if idx % self.downsample_factor == 0:
-                final_sample_count += 1
-                client_id_meta_data = {"client_id": sample.client_id}
-                meta_data = self.merge(
-                    self.track_meta_data,
-                    self.challenge_meta_data,
-                    sample.operation_meta_data,
-                    sample.task.meta_data,
-                    sample.request_meta_data,
-                    client_id_meta_data,
-                )
-
-                self.metrics_store.put_value_cluster_level(
-                    name="latency",
-                    value=convert.seconds_to_ms(sample.latency),
-                    unit="ms",
-                    task=sample.task.name,
-                    operation=sample.operation_name,
-                    operation_type=sample.operation_type,
-                    sample_type=sample.sample_type,
-                    absolute_time=sample.absolute_time,
-                    relative_time=sample.relative_time,
-                    meta_data=meta_data,
-                )
-
-                self.metrics_store.put_value_cluster_level(
-                    name="service_time",
-                    value=convert.seconds_to_ms(sample.service_time),
-                    unit="ms",
-                    task=sample.task.name,
-                    operation=sample.operation_name,
-                    operation_type=sample.operation_type,
-                    sample_type=sample.sample_type,
-                    absolute_time=sample.absolute_time,
-                    relative_time=sample.relative_time,
-                    meta_data=meta_data,
-                )
-
-                self.metrics_store.put_value_cluster_level(
-                    name="processing_time",
-                    value=convert.seconds_to_ms(sample.processing_time),
-                    unit="ms",
-                    task=sample.task.name,
-                    operation=sample.operation_name,
-                    operation_type=sample.operation_type,
-                    sample_type=sample.sample_type,
-                    absolute_time=sample.absolute_time,
-                    relative_time=sample.relative_time,
-                    meta_data=meta_data,
-                )
-
-                for timing in sample.dependent_timings:
-                    self.metrics_store.put_value_cluster_level(
-                        name="service_time",
-                        value=convert.seconds_to_ms(timing.service_time),
-                        unit="ms",
-                        task=timing.task.name,
-                        operation=timing.operation_name,
-                        operation_type=timing.operation_type,
-                        sample_type=timing.sample_type,
-                        absolute_time=timing.absolute_time,
-                        relative_time=timing.relative_time,
-                        meta_data=self.merge(timing.request_meta_data, client_id_meta_data),
+        if not throughput_only:
+            for idx, sample in enumerate(raw_samples):
+                if idx % self.downsample_factor == 0:
+                    final_sample_count += 1
+                    client_id_meta_data = {"client_id": sample.client_id}
+                    meta_data = self.merge(
+                        self.track_meta_data,
+                        self.challenge_meta_data,
+                        sample.operation_meta_data,
+                        sample.task.meta_data,
+                        sample.request_meta_data,
+                        client_id_meta_data,
                     )
 
-        end = time.perf_counter()
-        self.logger.debug("Storing latency and service time took [%f] seconds.", (end - start))
-        start = end
+                    self.metrics_store.put_value_cluster_level(
+                        name="latency",
+                        value=convert.seconds_to_ms(sample.latency),
+                        unit="ms",
+                        task=sample.task.name,
+                        operation=sample.operation_name,
+                        operation_type=sample.operation_type,
+                        sample_type=sample.sample_type,
+                        absolute_time=sample.absolute_time,
+                        relative_time=sample.relative_time,
+                        meta_data=meta_data,
+                    )
+
+                    self.metrics_store.put_value_cluster_level(
+                        name="service_time",
+                        value=convert.seconds_to_ms(sample.service_time),
+                        unit="ms",
+                        task=sample.task.name,
+                        operation=sample.operation_name,
+                        operation_type=sample.operation_type,
+                        sample_type=sample.sample_type,
+                        absolute_time=sample.absolute_time,
+                        relative_time=sample.relative_time,
+                        meta_data=meta_data,
+                    )
+
+                    self.metrics_store.put_value_cluster_level(
+                        name="processing_time",
+                        value=convert.seconds_to_ms(sample.processing_time),
+                        unit="ms",
+                        task=sample.task.name,
+                        operation=sample.operation_name,
+                        operation_type=sample.operation_type,
+                        sample_type=sample.sample_type,
+                        absolute_time=sample.absolute_time,
+                        relative_time=sample.relative_time,
+                        meta_data=meta_data,
+                    )
+
+                    for timing in sample.dependent_timings:
+                        self.metrics_store.put_value_cluster_level(
+                            name="service_time",
+                            value=convert.seconds_to_ms(timing.service_time),
+                            unit="ms",
+                            task=timing.task.name,
+                            operation=timing.operation_name,
+                            operation_type=timing.operation_type,
+                            sample_type=timing.sample_type,
+                            absolute_time=timing.absolute_time,
+                            relative_time=timing.relative_time,
+                            meta_data=self.merge(timing.request_meta_data, client_id_meta_data),
+                        )
+
+            end = time.perf_counter()
+            self.logger.debug("Storing latency and service time took [%f] seconds.", (end - start))
+            start = end
         aggregates = self.throughput_calculator.calculate(raw_samples)
         end = time.perf_counter()
         self.logger.debug("Calculating throughput took [%f] seconds.", (end - start))
@@ -1124,12 +1267,19 @@ class SamplePostprocessor:
         self.metrics_store.flush(refresh=False)
         end = time.perf_counter()
         self.logger.debug("Flushing the metrics store took [%f] seconds.", (end - start))
-        self.logger.debug(
-            "Postprocessing [%d] raw samples (downsampled to [%d] samples) took [%f] seconds in total.",
-            len(raw_samples),
-            final_sample_count,
-            (end - total_start),
-        )
+        if throughput_only:
+            self.logger.debug(
+                "Postprocessing [%d] raw samples (throughput only) took [%f] seconds in total.",
+                len(raw_samples),
+                (end - total_start),
+            )
+        else:
+            self.logger.debug(
+                "Postprocessing [%d] raw samples (downsampled to [%d] samples) took [%f] seconds in total.",
+                len(raw_samples),
+                final_sample_count,
+                (end - total_start),
+            )
 
     def merge(self, *args):
         result = {}
@@ -1221,7 +1371,7 @@ class Worker(actor.RallyActor):
         super().__init__()
         self.driver_actor = None
         self.worker_id = None
-        self.config: Optional[types.Config] = None
+        self.config: types.Config | None = None
         self.track = None
         self.client_allocations = None
         self.client_contexts = None
@@ -1239,6 +1389,7 @@ class Worker(actor.RallyActor):
         self.start_driving = False
         self.wakeup_interval = Worker.WAKEUP_INTERVAL_SECONDS
         self.sample_queue_size = None
+        self.metrics_store = None
 
     @actor.no_retry("worker")  # pylint: disable=no-value-for-parameter
     def receiveMsg_Bootstrap(self, msg, sender):
@@ -1261,6 +1412,19 @@ class Worker(actor.RallyActor):
         self.client_contexts = msg.client_contexts
         self.current_task_index = 0
         self.cancel.clear()
+        # When using Elasticsearch metrics store, open a local store and post-processor so this worker
+        # can submit samples to the metrics store (and still send raw samples to Driver for progress/throughput).
+        if msg.open_metrics_context is not None:
+            store_cls = metrics.metrics_store_class(self.config)
+            self.metrics_store = store_cls(cfg=self.config)
+            self.metrics_store.open(ctx=msg.open_metrics_context, create=False)
+            downsample_factor = int(self.config.opts("reporting", "metrics.request.downsample.factor", mandatory=False, default_value=1))
+            challenge = select_challenge(self.config, self.track)
+            self.sample_post_processor = SamplePostprocessor(
+                self.metrics_store, downsample_factor, self.track.meta_data, challenge.meta_data
+            )
+        else:
+            self.sample_post_processor = None
         # we need to wake up more often in test mode
         if self.config.opts("track", "test.mode.enabled"):
             self.wakeup_interval = 0.5
@@ -1281,6 +1445,13 @@ class Worker(actor.RallyActor):
         )
         self.start_driving = True
         self.wakeupAfter(sleep_time)
+
+    @actor.no_retry("worker")  # pylint: disable=no-value-for-parameter
+    def receiveMsg_WriteMetricsToStore(self, msg, sender):
+        if self.metrics_store is not None and msg.memento:
+            self.metrics_store.bulk_add(msg.memento)
+            self.metrics_store.flush(refresh=False)
+        self.send(self.driver_actor, WriteMetricsToStoreAck())
 
     @actor.no_retry("worker")  # pylint: disable=no-value-for-parameter
     def receiveMsg_CompleteCurrentTask(self, msg, sender):
@@ -1357,6 +1528,7 @@ class Worker(actor.RallyActor):
 
     def drive(self):
         assert self.config is not None
+        assert self.worker_id is not None
         task_allocations = self.current_tasks_and_advance()
         # skip non-tasks in the task list
         while len(task_allocations) == 0:
@@ -1411,9 +1583,13 @@ class Worker(actor.RallyActor):
         return current
 
     def send_samples(self):
-        if self.sampler:
+        if self.sampler and self.worker_id is not None:
             samples = self.sampler.samples
             if len(samples) > 0:
+                # When using ES metrics store, post-process and write samples to local store first,
+                # then send raw samples to Driver for progress and global throughput.
+                if self.sample_post_processor is not None:
+                    self.sample_post_processor(samples)
                 self.send(self.driver_actor, UpdateSamples(self.worker_id, samples))
             return samples
         return None
