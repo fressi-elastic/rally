@@ -44,6 +44,22 @@ class RequestMetricSketchKey(NamedTuple):
     sample_type: str
 
 
+class SketchState(NamedTuple):
+    """
+    Per-stream merged request metric state for coordinator-side in-memory aggregation (T04+).
+
+    ``merged_sketch`` holds the combined ``DDSketch`` for one logical stream. ``success_count`` and
+    ``failure_count`` are reserved for error-rate when raw per-request documents are absent.
+
+    T03 only declares the type and an empty ``InMemoryMetricsStore._request_sketch_table``; entries
+    are not populated yet.
+    """
+
+    merged_sketch: BaseDDSketch | None = None
+    success_count: int = 0
+    failure_count: int = 0  # paired with success_count for merged error-rate numerators/denominators
+
+
 def merge_sketches(a: BaseDDSketch, b: BaseDDSketch) -> DDSketch:
     """
     Return a new ``DDSketch`` containing the values from ``a`` and ``b``.
@@ -75,3 +91,43 @@ def deserialize_sketch(data: bytes) -> BaseDDSketch:
     msg = _pb_dds.DDSketch()
     msg.ParseFromString(data)
     return DDSketchProto.from_proto(msg)
+
+
+def approximate_sum_from_sketch(sketch: BaseDDSketch) -> float:
+    """
+    Approximate ``sum(values)`` from bucket contents after protobuf deserialize (where ``sum`` is 0).
+
+    Uses each bin's representative ``mapping.value(key)`` times its count; matches DDSketch's
+    relative accuracy about as well as quantile queries. Reads ``ddsketch`` private fields by
+    necessity (no public bin iterator).
+    """
+    mapping = sketch._mapping  # pylint: disable=protected-access
+    total = 0.0
+    st = sketch._store  # pylint: disable=protected-access
+    for i, bin_ct in enumerate(st.bins):
+        if bin_ct:
+            key = st.offset + i
+            total += mapping.value(key) * bin_ct
+    nst = sketch._negative_store  # pylint: disable=protected-access
+    for i, bin_ct in enumerate(nst.bins):
+        if bin_ct:
+            key = nst.offset + i
+            total += -mapping.value(key) * bin_ct
+    return total
+
+
+def sketch_sum_and_avg(sketch: BaseDDSketch) -> tuple[float, float]:
+    """
+    Return ``(sum, avg)`` for stats reporting.
+
+    Uses exact :attr:`BaseDDSketch.sum` when non-zero (live ``add`` path). When ``sum`` is zero but
+    ``count`` is positive (typical after :func:`deserialize_sketch`), falls back to
+    :func:`approximate_sum_from_sketch` so coordinator-side merges over wire bytes stay usable.
+    """
+    count = float(sketch.count)
+    if count == 0.0:
+        return 0.0, float("nan")
+    if sketch.sum != 0.0:
+        return sketch.sum, sketch.avg
+    approx = approximate_sum_from_sketch(sketch)
+    return approx, approx / count

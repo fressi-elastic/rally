@@ -15,18 +15,54 @@
 # specific language governing permissions and limitations
 # under the License.
 
+# pylint: disable=protected-access
+
+import collections
+import datetime
 import math
 
 import pytest
 from ddsketch.ddsketch import DEFAULT_REL_ACC, DDSketch
 
+from esrally import config, metrics
 from esrally.metrics.sketch_utils import (
     REQUEST_METRIC_SKETCH_RELATIVE_ACCURACY,
     RequestMetricSketchKey,
+    approximate_sum_from_sketch,
     deserialize_sketch,
     merge_sketches,
     serialize_sketch,
+    sketch_sum_and_avg,
 )
+from esrally.track import track
+
+RACE_TIMESTAMP = datetime.datetime(2016, 1, 31)
+RACE_ID = "6ebc6e53-ee20-4b0c-99b4-09697987e9f4"
+
+# DDSketch default relative accuracy is ~1% (DEFAULT_REL_ACC). Quantile estimates are
+# approximate; tests allow a small margin above that for floating-point noise.
+_PCT_TOL = REQUEST_METRIC_SKETCH_RELATIVE_ACCURACY * 2
+
+
+@pytest.fixture
+def in_memory_metrics_store_sketch_path():
+    cfg = config.Config()
+    cfg.add(config.Scope.application, "system", "env.name", "unittest")
+    cfg.add(config.Scope.application, "track", "params", {})
+    ms = metrics.InMemoryMetricsStore(cfg)
+    ms.open(
+        RACE_ID,
+        RACE_TIMESTAMP,
+        "test",
+        "append-no-conflicts",
+        "defaults",
+        create=True,
+    )
+    return ms
+
+
+def _aggregated_latency_key(store, task, operation_type):
+    return store.aggregated_latency_sketch_key(task=task, operation_type=operation_type)
 
 
 def test_request_metric_sketch_key_is_named_tuple():
@@ -130,3 +166,175 @@ def test_serialize_deserialize_empty_sketch():
     s2 = deserialize_sketch(serialize_sketch(s))
     assert s2.count == 0
     assert s2.get_quantile_value(0.5) is None
+
+
+def test_sketch_sum_and_avg_uses_exact_when_present():
+    s = DDSketch()
+    for x in (2.0, 4.0, 8.0):
+        s.add(x)
+    total, avg = sketch_sum_and_avg(s)
+    assert total == pytest.approx(14.0)
+    assert avg == pytest.approx(14.0 / 3.0)
+
+
+def test_sketch_sum_and_avg_recover_after_protobuf_deserialize():
+    s = DDSketch()
+    for x in range(1, 101):
+        s.add(float(x))
+    d = deserialize_sketch(serialize_sketch(s))
+    assert d.sum == 0.0
+    total, avg = sketch_sum_and_avg(d)
+    assert total == pytest.approx(approximate_sum_from_sketch(d))
+    assert avg == pytest.approx(total / 100.0)
+    assert avg == pytest.approx(50.5, rel=REQUEST_METRIC_SKETCH_RELATIVE_ACCURACY * 2)
+
+
+def test_merge_serialized_sketch_deltas_get_stats_mean_near_reference(in_memory_metrics_store_sketch_path):
+    """Wire bytes lose exact ``sum``/``avg``; :func:`sketch_sum_and_avg` restores approximate stats."""
+    store = in_memory_metrics_store_sketch_path
+    task = "index #1"
+    op_type = track.OperationType.Bulk
+    key = _aggregated_latency_key(store, task, op_type)
+
+    a = DDSketch()
+    for v in range(1, 51):
+        a.add(float(v))
+    b = DDSketch()
+    for v in range(51, 101):
+        b.add(float(v))
+
+    store.merge_request_sketch_delta(key, serialize_sketch(a))
+    store.merge_request_sketch_delta(key, serialize_sketch(b))
+
+    stats = store.get_stats("latency", task=task, operation_type=op_type, sample_type=metrics.SampleType.Normal)
+    assert stats["count"] == 100
+    assert stats["avg"] == pytest.approx(50.5, rel=_PCT_TOL)
+    assert stats["sum"] == pytest.approx(50.5 * 100, rel=_PCT_TOL)
+
+
+def test_merge_two_sketch_deltas_percentiles_within_ddsketch_accuracy(in_memory_metrics_store_sketch_path):
+    store = in_memory_metrics_store_sketch_path
+    task = "index #1"
+    op_type = track.OperationType.Bulk
+    key = _aggregated_latency_key(store, task, op_type)
+
+    a = DDSketch()
+    for v in range(1, 51):
+        a.add(float(v))
+    b = DDSketch()
+    for v in range(51, 101):
+        b.add(float(v))
+
+    store.merge_request_sketch_delta(key, serialize_sketch(a))
+    store.merge_request_sketch_delta(key, serialize_sketch(b))
+
+    raw = [float(x) for x in range(1, 101)]
+    sorted_raw = sorted(raw)
+    percentiles = [50, 90, 99, 100]
+    ref = collections.OrderedDict()
+    for p in percentiles:
+        ref[p] = metrics.InMemoryMetricsStore.percentile_value(sorted_raw, p)
+
+    got = store.get_percentiles(
+        "latency",
+        task=task,
+        operation_type=op_type,
+        sample_type=metrics.SampleType.Normal,
+        percentiles=percentiles,
+    )
+    assert got is not None
+    for p in percentiles:
+        assert got[p] == pytest.approx(ref[p], rel=_PCT_TOL), f"percentile {p}"
+
+
+def test_docs_only_latency_unchanged_no_sketch_merge(in_memory_metrics_store_sketch_path):
+    """No ``merge_request_sketch_delta``: legacy doc scan only (sketch table empty)."""
+    store = in_memory_metrics_store_sketch_path
+    task = "index #1"
+    op_type = track.OperationType.Bulk
+    store.put_value_cluster_level("latency", 10.0, "ms", task=task, operation_type=op_type)
+    store.put_value_cluster_level("latency", 20.0, "ms", task=task, operation_type=op_type)
+    store.put_value_cluster_level("latency", 30.0, "ms", task=task, operation_type=op_type)
+
+    assert store._request_sketch_table == {}
+
+    values = store.get("latency", task=task, operation_type=op_type, sample_type=metrics.SampleType.Normal)
+    sorted_raw = sorted(values)
+    percentiles = [50, 100]
+    ref = collections.OrderedDict()
+    for p in percentiles:
+        ref[p] = metrics.InMemoryMetricsStore.percentile_value(sorted_raw, p)
+
+    got = store.get_percentiles(
+        "latency",
+        task=task,
+        operation_type=op_type,
+        sample_type=metrics.SampleType.Normal,
+        percentiles=percentiles,
+    )
+    assert got[50] == ref[50]
+    assert got[100] == ref[100]
+
+    stats = store.get_stats("latency", task=task, operation_type=op_type, sample_type=metrics.SampleType.Normal)
+    assert stats["count"] == 3
+    assert stats["min"] == 10.0
+    assert stats["max"] == 30.0
+    assert stats["avg"] == pytest.approx(20.0)
+    assert stats["sum"] == pytest.approx(60.0)
+
+
+def test_sketch_only_get_stats_get_mean_get_percentiles_single_latency_sequence(in_memory_metrics_store_sketch_path):
+    """Mirrors ``GlobalStatsCalculator.single_latency``: ``get_stats`` then percentiles + mean."""
+    store = in_memory_metrics_store_sketch_path
+    task = "index #1"
+    op_type = track.OperationType.Bulk
+    key = _aggregated_latency_key(store, task, op_type)
+
+    sk = DDSketch()
+    for v in (2.0, 4.0, 8.0, 16.0):
+        sk.add(v)
+    store.merge_request_sketch_delta(key, sk)
+
+    st = metrics.SampleType.Normal
+    stats = store.get_stats("latency", task=task, operation_type=op_type, sample_type=st)
+    assert stats["count"] == 4
+    assert stats["avg"] == pytest.approx(sk.avg, rel=_PCT_TOL)
+    assert stats["sum"] == pytest.approx(sk.sum, rel=_PCT_TOL)
+
+    sample_size = stats["count"]
+    assert sample_size > 0
+    pct_list = metrics.percentiles_for_sample_size(sample_size)
+    percentiles = store.get_percentiles("latency", task=task, operation_type=op_type, sample_type=st, percentiles=pct_list)
+    mean = store.get_mean("latency", task=task, operation_type=op_type, sample_type=st)
+
+    assert mean == pytest.approx(stats["avg"], rel=_PCT_TOL)
+    for p, v in percentiles.items():
+        q = float(p) / 100.0
+        assert v == pytest.approx(sk.get_quantile_value(q), rel=_PCT_TOL)
+
+
+def test_merge_accepts_live_sketch_instance(in_memory_metrics_store_sketch_path):
+    store = in_memory_metrics_store_sketch_path
+    task = "t1"
+    op_type = track.OperationType.Search
+    key = _aggregated_latency_key(store, task, op_type)
+    s = DDSketch()
+    s.add(42.0)
+    store.merge_request_sketch_delta(key, s)
+    assert store._request_sketch_table[key].merged_sketch.count == 1
+
+
+def test_latency_sketch_not_used_when_sample_type_unspecified(in_memory_metrics_store_sketch_path):
+    """``get_percentiles`` defaults ``sample_type`` to None → legacy path (not Normal-only sketch)."""
+    store = in_memory_metrics_store_sketch_path
+    task = "index #1"
+    op_type = track.OperationType.Bulk
+    key = _aggregated_latency_key(store, task, op_type)
+    sk = DDSketch()
+    sk.add(99.0)
+    store.merge_request_sketch_delta(key, sk)
+
+    store.put_value_cluster_level("latency", 1.0, "ms", task=task, operation_type=op_type)
+
+    got = store.get_percentiles("latency", task=task, operation_type=op_type, percentiles=[100])
+    assert got[100] == pytest.approx(1.0)

@@ -30,8 +30,16 @@ import zlib
 from enum import Enum, IntEnum
 
 import tabulate
+from ddsketch.ddsketch import BaseDDSketch, DDSketch
 
 from esrally import client, config, exceptions, paths, time, types, version
+from esrally.metrics.sketch_utils import (
+    RequestMetricSketchKey,
+    SketchState,
+    deserialize_sketch,
+    merge_sketches,
+    sketch_sum_and_avg,
+)
 from esrally.utils import console, convert, io, pretty, versions
 
 
@@ -1181,6 +1189,71 @@ class InMemoryMetricsStore(MetricsStore):
         """
         super().__init__(cfg=cfg, clock=clock, meta_info=meta_info)
         self.docs = []
+        # Mergeable quantile state per request-metric stream (Option B). Inactive in T03: always empty; legacy path uses self.docs only.
+        self._request_sketch_table: dict[RequestMetricSketchKey, SketchState] = {}
+
+    def open(self, race_id=None, race_timestamp=None, track_name=None, challenge_name=None, car_name=None, ctx=None, create=False):
+        # Match EsMetricsStore: reset race-scoped buffers when opening so a new race never inherits sketch state.
+        super().open(
+            race_id=race_id,
+            race_timestamp=race_timestamp,
+            track_name=track_name,
+            challenge_name=challenge_name,
+            car_name=car_name,
+            ctx=ctx,
+            create=create,
+        )
+        self._request_sketch_table.clear()
+
+    @staticmethod
+    def aggregated_latency_sketch_key(task=None, operation_type=None) -> RequestMetricSketchKey:
+        """
+        Canonical :class:`RequestMetricSketchKey` for **latency** + :class:`SampleType.Normal` (T04).
+
+        ``operation`` is always ``""``: the stream is the **aggregated** slice matching
+        :meth:`_get` filters (``task``, ``operation-type``, ``sample-type``), not a single
+        per-operation name. Workers and aggregators must use the same key when merging
+        sketch deltas.
+        """
+        return RequestMetricSketchKey(
+            metric_name="latency",
+            task=task or "",
+            operation="",
+            operation_type=operation_type or "",
+            sample_type=SampleType.Normal.name.lower(),
+        )
+
+    def _merged_latency_sketch_for_query(self, name, task, operation_type, sample_type):
+        # Require explicit task and operation_type so sketch keys match unambiguous streams.
+        # ``_get`` with ``task is None`` / ``operation_type is None`` aggregates across all
+        # values; that is not the same slice as ``aggregated_latency_sketch_key`` with "".
+        if name != "latency" or sample_type is not SampleType.Normal or task is None or operation_type is None:
+            return None
+        key = self.aggregated_latency_sketch_key(task=task, operation_type=operation_type)
+        state = self._request_sketch_table.get(key)
+        if state is None or state.merged_sketch is None or state.merged_sketch.count == 0:
+            return None
+        return state.merged_sketch
+
+    def merge_request_sketch_delta(self, key: RequestMetricSketchKey, delta: bytes | BaseDDSketch) -> None:
+        """
+        Merge serialized sketch bytes (or a live ``BaseDDSketch``) into ``_request_sketch_table``
+        for ``key``, updating :attr:`SketchState.merged_sketch`. Success/failure counters are
+        unchanged (reserved for error-rate / T06).
+        """
+        incoming = deserialize_sketch(delta) if isinstance(delta, bytes) else delta
+        if not isinstance(incoming, BaseDDSketch):
+            raise TypeError("delta must be protobuf bytes or a BaseDDSketch instance")
+        state = self._request_sketch_table.get(key)
+        old = state.merged_sketch if state and state.merged_sketch is not None else DDSketch()
+        merged = merge_sketches(old, incoming)
+        success_count = state.success_count if state else 0
+        failure_count = state.failure_count if state else 0
+        self._request_sketch_table[key] = SketchState(
+            merged_sketch=merged,
+            success_count=success_count,
+            failure_count=failure_count,
+        )
 
     def __del__(self):
         """
@@ -1207,6 +1280,13 @@ class InMemoryMetricsStore(MetricsStore):
     def get_percentiles(self, name, task=None, operation_type=None, sample_type=None, percentiles=None):
         if percentiles is None:
             percentiles = [99, 99.9, 100]
+        sketch = self._merged_latency_sketch_for_query(name, task, operation_type, sample_type)
+        if sketch is not None:
+            result = collections.OrderedDict()
+            for percentile in percentiles:
+                q = float(percentile) / 100.0
+                result[percentile] = sketch.get_quantile_value(q)
+            return result
         result = collections.OrderedDict()
         values = self.get(name, task, operation_type, sample_type)
         if len(values) > 0:
@@ -1257,6 +1337,17 @@ class InMemoryMetricsStore(MetricsStore):
             return 0.0
 
     def get_stats(self, name, task=None, operation_type=None, sample_type=SampleType.Normal):
+        sketch = self._merged_latency_sketch_for_query(name, task, operation_type, sample_type)
+        if sketch is not None:
+            count = int(sketch.count)
+            total_sum, avg = sketch_sum_and_avg(sketch)
+            return {
+                "count": count,
+                "min": sketch.get_quantile_value(0.0),
+                "max": sketch.get_quantile_value(1.0),
+                "avg": avg,
+                "sum": total_sum,
+            }
         values = self.get(name, task, operation_type, sample_type)
         sorted_values = sorted(values)
         if len(sorted_values) > 0:

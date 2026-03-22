@@ -63,6 +63,7 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
+| **Status** | **Done** |
 | **Goal** | `InMemoryMetricsStore` gains private `_request_sketch_table: dict[RequestMetricSketchKey, SketchState]` (or equivalent) **always empty** on construction; no behavior change for reads/writes yet. |
 | **Start** | T02 merged. |
 | **Work** | Add types; `open()` leaves table empty; existing `_add` / `docs` path unchanged. |
@@ -77,9 +78,10 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
+| **Status** | **Done** |
 | **Goal** | API to merge worker/aggregator deltas into `_request_sketch_table`; `get_percentiles` for `name=="latency"` uses sketch when key matches else legacy scan. |
 | **Start** | T03 merged. |
-| **Work** | Implement routing only for latency + `SampleType.Normal` first if needed to limit scope. |
+| **Work** | Implemented: `merge_request_sketch_delta`, `aggregated_latency_sketch_key`, routing for **latency** + **SampleType.Normal** only. **`get_stats`** / **`get_mean`** use the merged sketch when present so `GlobalStatsCalculator.single_latency` works with sketch-only data. Protobuf sketch bytes drop exact `sum`/`avg`; **`sketch_sum_and_avg`** in `sketch_utils` approximates sum from bucket centroids when `sum==0`. Sketch routing applies only when **`task` and `operation_type` are both non-None** (explicit stream); `sample_type` must be `Normal`. |
 | **End** | Legacy-only races unchanged (no sketch → old path). |
 | **Unit tests** | Synthetic: merge two deltas, `get_percentiles` matches reference sorted list within DDSketch accuracy; legacy docs-only store unchanged. |
 | **Integration tests** | `InMemoryMetricsStore` scenario used in reporter tests if any; else new integration test building store + `GlobalStatsCalculator.single_latency` mock path. |
