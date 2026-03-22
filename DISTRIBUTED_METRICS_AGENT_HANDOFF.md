@@ -123,6 +123,7 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
+| **Status** | **Done** |
 | **Goal** | Move logic to e.g. `esrally/driver/request_metrics.py` class called by `SamplePostprocessor`; **byte-for-byte equivalent** docs for same input samples (in-memory). |
 | **Start** | T06 merged (or T03 if T04–T06 delayed — then rebase). |
 | **Work** | Refactor only; `Driver` still calls post-processor as today. |

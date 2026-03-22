@@ -48,6 +48,7 @@ from esrally import (
 )
 from esrally.client import delete_api_keys
 from esrally.driver import runner, scheduler
+from esrally.driver.request_metrics import RequestMetricsRecorder
 from esrally.track import TrackProcessorRegistry, load_track, load_track_plugins
 from esrally.utils import console, convert, net
 from esrally.utils.error_behavior import OnErrorBehavior
@@ -1017,79 +1018,14 @@ class SamplePostprocessor:
         self.challenge_meta_data = challenge_meta_data
         self.throughput_calculator = ThroughputCalculator()
         self.downsample_factor = downsample_factor
+        self.request_metrics_recorder = RequestMetricsRecorder(metrics_store, downsample_factor, track_meta_data, challenge_meta_data)
 
     def __call__(self, raw_samples):
         if len(raw_samples) == 0:
             return
         total_start = time.perf_counter()
         start = total_start
-        final_sample_count = 0
-        for idx, sample in enumerate(raw_samples):
-            if idx % self.downsample_factor == 0:
-                final_sample_count += 1
-                client_id_meta_data = {"client_id": sample.client_id}
-                meta_data = self.merge(
-                    self.track_meta_data,
-                    self.challenge_meta_data,
-                    sample.operation_meta_data,
-                    sample.task.meta_data,
-                    sample.request_meta_data,
-                    client_id_meta_data,
-                )
-
-                self.metrics_store.put_value_cluster_level(
-                    name="latency",
-                    value=convert.seconds_to_ms(sample.latency),
-                    unit="ms",
-                    task=sample.task.name,
-                    operation=sample.operation_name,
-                    operation_type=sample.operation_type,
-                    sample_type=sample.sample_type,
-                    absolute_time=sample.absolute_time,
-                    relative_time=sample.relative_time,
-                    meta_data=meta_data,
-                )
-
-                self.metrics_store.put_value_cluster_level(
-                    name="service_time",
-                    value=convert.seconds_to_ms(sample.service_time),
-                    unit="ms",
-                    task=sample.task.name,
-                    operation=sample.operation_name,
-                    operation_type=sample.operation_type,
-                    sample_type=sample.sample_type,
-                    absolute_time=sample.absolute_time,
-                    relative_time=sample.relative_time,
-                    meta_data=meta_data,
-                )
-
-                self.metrics_store.put_value_cluster_level(
-                    name="processing_time",
-                    value=convert.seconds_to_ms(sample.processing_time),
-                    unit="ms",
-                    task=sample.task.name,
-                    operation=sample.operation_name,
-                    operation_type=sample.operation_type,
-                    sample_type=sample.sample_type,
-                    absolute_time=sample.absolute_time,
-                    relative_time=sample.relative_time,
-                    meta_data=meta_data,
-                )
-
-                for timing in sample.dependent_timings:
-                    self.metrics_store.put_value_cluster_level(
-                        name="service_time",
-                        value=convert.seconds_to_ms(timing.service_time),
-                        unit="ms",
-                        task=timing.task.name,
-                        operation=timing.operation_name,
-                        operation_type=timing.operation_type,
-                        sample_type=timing.sample_type,
-                        absolute_time=timing.absolute_time,
-                        relative_time=timing.relative_time,
-                        meta_data=self.merge(timing.request_meta_data, client_id_meta_data),
-                    )
-
+        final_sample_count = self.request_metrics_recorder(raw_samples)
         end = time.perf_counter()
         self.logger.debug("Storing latency and service time took [%f] seconds.", (end - start))
         start = end
