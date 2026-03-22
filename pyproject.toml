@@ -134,6 +134,7 @@ develop = [
     "types-urllib3==1.26.19",
     "types-requests<2.32.0",
     "types-jsonschema==3.2.0",
+    "types-protobuf",
     # Python dead library removed in version 3.13 and used to build Rally docs.
     "standard-imghdr==3.13.0",
 ]
@@ -220,8 +221,11 @@ files = ["esrally/", "it/", "tests/"]
 [[tool.mypy.overrides]]
 module = [
     "esrally.actor",
+    "esrally.driver.request_metrics",
+    "esrally.driver.throughput_buckets",
     "estally.log",
     "esrally.mechanic.team",
+    "esrally.metrics.sketch_utils",
     "esrally.storage.*",
     "esrally.utils.cases",
     "esrally.utils.convert",

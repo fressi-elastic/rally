@@ -676,6 +676,7 @@ develop = [
     { name = "standard-imghdr" },
     { name = "trustme" },
     { name = "types-jsonschema" },
+    { name = "types-protobuf" },
     { name = "types-psutil" },
     { name = "types-requests" },
     { name = "types-tabulate" },
@@ -734,6 +735,7 @@ requires-dist = [
     { name = "thespian", specifier = "==4.0.1" },
     { name = "trustme", marker = "extra == 'develop'", specifier = "==0.9.0" },
     { name = "types-jsonschema", marker = "extra == 'develop'", specifier = "==3.2.0" },
+    { name = "types-protobuf", marker = "extra == 'develop'" },
     { name = "types-psutil", marker = "extra == 'develop'", specifier = "==5.9.4" },
     { name = "types-requests", marker = "extra == 'develop'", specifier = "<2.32.0" },
     { name = "types-tabulate", marker = "extra == 'develop'", specifier = "==0.8.9" },
@@ -2332,6 +2334,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/2c/1c/cc3f150d59fcc0ad00b1a8bab7fcda8d36745bf7529413aec719d0a725a1/types-jsonschema-3.2.0.tar.gz", hash = "sha256:1bbee1d5992f768f798aea96f05045821035e919a34136ea94f0444f31d08189", size = 4602, upload-time = "2021-07-15T18:19:35.533Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/f0/7558cd331217021e37975f4f0fb4f58548971d002c6401d5012194fd781b/types_jsonschema-3.2.0-py3-none-any.whl", hash = "sha256:4a8f2e87aa7001361b4c3666565f8684f0e016517228396ac1bffd397d8c3fd0", size = 6619, upload-time = "2021-07-15T18:19:34.203Z" },
+]
+
+[[package]]
+name = "types-protobuf"
+version = "6.32.1.20260221"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5f/e2/9aa4a3b2469508bd7b4e2ae11cbedaf419222a09a1b94daffcd5efca4023/types_protobuf-6.32.1.20260221.tar.gz", hash = "sha256:6d5fb060a616bfb076cbb61b4b3c3969f5fc8bec5810f9a2f7e648ee5cbcbf6e", size = 64408, upload-time = "2026-02-21T03:55:13.916Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/e8/1fd38926f9cf031188fbc5a96694203ea6f24b0e34bd64a225ec6f6291ba/types_protobuf-6.32.1.20260221-py3-none-any.whl", hash = "sha256:da7cdd947975964a93c30bfbcc2c6841ee646b318d3816b033adc2c4eb6448e4", size = 77956, upload-time = "2026-02-21T03:55:12.894Z" },
 ]
 
 [[package]]
