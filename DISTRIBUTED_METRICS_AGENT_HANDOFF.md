@@ -138,6 +138,7 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
+| **Status** | **Done** |
 | **Goal** | New actor message type; `Driver.update_samples` also accepts progress-only updates OR dedicated handler updates `most_recent_sample_per_client` without `raw_samples`. |
 | **Start** | T07 merged. |
 | **Work** | **Do not remove** `UpdateSamples` yet. Workers may send `ProgressUpdate` in tests only. |

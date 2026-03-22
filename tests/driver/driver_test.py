@@ -28,7 +28,7 @@ import pytest
 
 from esrally import config, exceptions, metrics, track
 from esrally.driver import driver, runner, scheduler
-from esrally.driver.driver import ApiKey, ClientContext
+from esrally.driver.driver import ApiKey, ClientContext, ClientProgressSnapshot
 from esrally.track import params
 from esrally.utils.error_behavior import OnErrorBehavior
 
@@ -216,6 +216,32 @@ class TestDriver:
             },
             "tagline": "You Know, for Search",
         }
+
+    def test_update_client_progress_updates_progress_message_without_raw_samples(self):
+        # Driver() alone does not construct the client factory; start the class ES patcher for teardown_method.
+        self.StaticClientFactory()
+        driver_actor = self.create_test_driver_actor()
+        d = driver.Driver(driver_actor, self.cfg, es_client_factory_class=self.StaticClientFactory)
+
+        d.quiet = False
+        d.current_step = 0
+        task = mock.Mock()
+        task.name = "progress-task"
+        d.tasks_per_join_point = [[task]]
+        d.progress_reporter.print = mock.Mock()
+
+        d.update_client_progress(
+            [
+                ClientProgressSnapshot(client_id=0, percent_completed=0.5),
+                ClientProgressSnapshot(client_id=1, percent_completed=1.0),
+            ]
+        )
+        assert d.raw_samples == []
+
+        d.update_progress_message()
+        # Same formula as Driver.update_progress_message: sum / max(len(progress_per_client), 1)
+        expected_pct = round((0.5 + 1.0) / 2 * 100)
+        d.progress_reporter.print.assert_called_once_with("Running progress-task", f"[{expected_pct:3d}% done]")
 
     def test_assign_drivers_round_robin(self):
         worker_id = [0, 1, 2, 3]

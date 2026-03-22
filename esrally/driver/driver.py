@@ -27,6 +27,7 @@ import queue
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from io import BytesIO
@@ -188,6 +189,25 @@ class UpdateSamples:
         self.samples = samples
 
 
+@dataclass(frozen=True)
+class ClientProgressSnapshot:
+    """
+    Minimal per-client progress for the coordinator UI without attaching full samples.
+    """
+
+    client_id: int
+    percent_completed: float | None
+
+
+class ProgressUpdate:
+    """
+    Updates per-client progress on the driver without appending to ``raw_samples``.
+    """
+
+    def __init__(self, snapshots: Sequence[ClientProgressSnapshot]):
+        self.snapshots = snapshots
+
+
 class JoinPointReached:
     """
     Tells the master that a load generator has reached a join point. Used for coordination across multiple load generators.
@@ -217,7 +237,7 @@ class TaskFinished:
         self.next_task_scheduled_in = next_task_scheduled_in
 
 
-class DriverActor(actor.RallyActor):
+class DriverActor(actor.RallyActor):  # pylint: disable=too-many-public-methods
     RESET_RELATIVE_TIME_MARKER = "reset_relative_time"
 
     WAKEUP_INTERVAL_SECONDS = 1
@@ -296,6 +316,10 @@ class DriverActor(actor.RallyActor):
     @actor.no_retry("driver")  # pylint: disable=no-value-for-parameter
     def receiveMsg_UpdateSamples(self, msg, sender):
         self.driver.update_samples(msg.samples)
+
+    @actor.no_retry("driver")  # pylint: disable=no-value-for-parameter
+    def receiveMsg_ProgressUpdate(self, msg, sender):
+        self.driver.update_client_progress(msg.snapshots)
 
     @actor.no_retry("driver")  # pylint: disable=no-value-for-parameter
     def receiveMsg_WakeupMessage(self, msg, sender):
@@ -981,6 +1005,10 @@ class Driver:
             # We need to check all samples, they will be from different clients
             for s in samples:
                 self.most_recent_sample_per_client[s.client_id] = s
+
+    def update_client_progress(self, snapshots: Sequence[ClientProgressSnapshot]) -> None:
+        for snapshot in snapshots:
+            self.most_recent_sample_per_client[snapshot.client_id] = snapshot
 
     def update_progress_message(self, task_finished=False):
         if not self.quiet and self.current_step >= 0:
