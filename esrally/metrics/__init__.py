@@ -1182,6 +1182,39 @@ class EsMetricsStore(MetricsStore):
         return "Elasticsearch metrics store"
 
 
+def worker_elasticsearch_metrics_store_if_enabled(
+    cfg: types.Config,
+    track_name: str,
+    challenge_name: str,
+    *,
+    client_factory_class=EsClientFactory,
+    index_template_provider_class=IndexTemplateProvider,
+    clock=time.Clock,
+) -> EsMetricsStore | None:
+    """
+    Opens an :class:`EsMetricsStore` for worker-side writes when distributed request metrics to Elasticsearch are enabled.
+
+    Uses the same race identity as :func:`metrics_store` (``system.race.id``, ``system.time.start``, track/challenge/car from config).
+    Returns ``None`` when ``driver.distributed.request.metrics`` is false or the reporting datastore is not Elasticsearch.
+    """
+    if not convert.to_bool(cfg.opts("driver", "distributed.request.metrics", mandatory=False, default_value=False)):
+        return None
+    if cfg.opts("reporting", "datastore.type") != "elasticsearch":
+        return None
+    store = EsMetricsStore(
+        cfg=cfg,
+        client_factory_class=client_factory_class,
+        index_template_provider_class=index_template_provider_class,
+        clock=clock,
+    )
+    logging.getLogger(__name__).info("Creating %s (worker distributed metrics)", str(store))
+    race_id = cfg.opts("system", "race.id")
+    race_timestamp = cfg.opts("system", "time.start")
+    selected_car = cfg.opts("mechanic", "car.names")
+    store.open(race_id, race_timestamp, track_name, challenge_name, selected_car, create=True)
+    return store
+
+
 class InMemoryMetricsStore(MetricsStore):
     def __init__(self, cfg: types.Config, clock=time.Clock, meta_info=None):
         """

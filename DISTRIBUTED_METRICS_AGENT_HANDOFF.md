@@ -168,7 +168,8 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
-| **Goal** | When `driver.distributed_request_metrics=true` and `reporting.datastore.type=elasticsearch`, worker process opens store with same `race-id` (from config) and can `flush` a test batch. Coordinator still runs old path (dual-write behind sub-flag **or** worker-only in integration test harness). |
+| **Status** | **Done** |
+| **Goal** | When `driver.distributed.request.metrics=true` and `reporting.datastore.type=elasticsearch`, worker process opens store with same `race-id` (from config) and can `flush` a test batch. Coordinator still runs old path (dual-write behind sub-flag **or** worker-only in integration test harness). |
 | **Start** | T09 merged. |
 | **Work** | Minimal wiring in worker bootstrap; guard all new paths with flag. |
 | **End** | Flag **false** → zero change. |

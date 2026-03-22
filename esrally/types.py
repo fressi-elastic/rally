@@ -82,6 +82,7 @@ Key = Literal[
     "delete.config.option",
     "delete.id",
     "devices",
+    "distributed.request.metrics",
     "distribution.dir",
     "distribution.flavor",
     "distribution.repository",

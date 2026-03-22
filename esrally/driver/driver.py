@@ -1203,6 +1203,7 @@ class Worker(actor.RallyActor):
         self.start_driving = False
         self.wakeup_interval = Worker.WAKEUP_INTERVAL_SECONDS
         self.sample_queue_size = None
+        self._worker_elasticsearch_metrics_store = None
 
     @actor.no_retry("worker")  # pylint: disable=no-value-for-parameter
     def receiveMsg_Bootstrap(self, msg, sender):
@@ -1225,6 +1226,13 @@ class Worker(actor.RallyActor):
         self.client_contexts = msg.client_contexts
         self.current_task_index = 0
         self.cancel.clear()
+        challenge = select_challenge(self.config, self.track)
+        self._worker_elasticsearch_metrics_store = metrics.worker_elasticsearch_metrics_store_if_enabled(
+            self.config, self.track.name, challenge.name
+        )
+        if self._worker_elasticsearch_metrics_store is not None:
+            self._worker_elasticsearch_metrics_store.put_value_cluster_level("worker_es_metrics_probe", 1.0, "none")
+            self._worker_elasticsearch_metrics_store.flush(refresh=False)
         # we need to wake up more often in test mode
         if self.config.opts("track", "test.mode.enabled"):
             self.wakeup_interval = 0.5
@@ -1305,8 +1313,13 @@ class Worker(actor.RallyActor):
                     self.logger.debug("Worker[%s] is executing (no samples).", str(self.worker_id))
                 self.wakeupAfter(datetime.timedelta(seconds=self.wakeup_interval))
 
+    @actor.no_retry("worker")  # pylint: disable=no-value-for-parameter
     def receiveMsg_ActorExitRequest(self, msg, sender):
         self.logger.debug("Worker[%s] has received ActorExitRequest.", str(self.worker_id))
+        if self._worker_elasticsearch_metrics_store is not None:
+            if self._worker_elasticsearch_metrics_store.opened:
+                self._worker_elasticsearch_metrics_store.close()
+            self._worker_elasticsearch_metrics_store = None
         if self.executor_future is not None and self.executor_future.running():
             self.cancel.set()
         self.pool.shutdown()
