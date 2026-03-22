@@ -49,10 +49,8 @@ class SketchState(NamedTuple):
     Per-stream merged request metric state for coordinator-side in-memory aggregation (T04+).
 
     ``merged_sketch`` holds the combined ``DDSketch`` for one logical stream. ``success_count`` and
-    ``failure_count`` are reserved for error-rate when raw per-request documents are absent.
-
-    T03 only declares the type and an empty ``InMemoryMetricsStore._request_sketch_table``; entries
-    are not populated yet.
+    ``failure_count`` back :meth:`InMemoryMetricsStore.get_error_rate` when per-request
+    ``service_time`` documents are absent (Option B).
     """
 
     merged_sketch: BaseDDSketch | None = None

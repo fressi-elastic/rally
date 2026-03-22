@@ -386,6 +386,108 @@ def test_request_timing_sketch_not_used_when_sample_type_unspecified(
     assert got[100] == pytest.approx(1.0)
 
 
+def test_merge_request_sketch_delta_rejects_negative_outcome_deltas(in_memory_metrics_store_sketch_path):
+    store = in_memory_metrics_store_sketch_path
+    key = store.aggregated_request_timing_sketch_key("service_time", task="t", operation_type=track.OperationType.Bulk)
+    sk = DDSketch()
+    sk.add(1.0)
+    with pytest.raises(ValueError, match="non-negative"):
+        store.merge_request_sketch_delta(key, sk, success_count_delta=-1, failure_count_delta=0)
+    with pytest.raises(ValueError, match="non-negative"):
+        store.merge_request_sketch_delta(key, sk, success_count_delta=0, failure_count_delta=-1)
+
+
+def test_get_error_rate_sketch_counters_success_only(in_memory_metrics_store_sketch_path):
+    store = in_memory_metrics_store_sketch_path
+    task = "index #1"
+    op_type = track.OperationType.Bulk
+    key = store.aggregated_request_timing_sketch_key("service_time", task=task, operation_type=op_type)
+    sk = DDSketch()
+    sk.add(5.0)
+    store.merge_request_sketch_delta(key, sk, success_count_delta=100, failure_count_delta=0)
+    assert store.get_error_rate(task, operation_type=op_type, sample_type=metrics.SampleType.Normal) == 0.0
+
+
+def test_get_error_rate_sketch_counters_failure_only(in_memory_metrics_store_sketch_path):
+    store = in_memory_metrics_store_sketch_path
+    task = "index #1"
+    op_type = track.OperationType.Bulk
+    key = store.aggregated_request_timing_sketch_key("service_time", task=task, operation_type=op_type)
+    sk = DDSketch()
+    sk.add(1.0)
+    store.merge_request_sketch_delta(key, sk, success_count_delta=0, failure_count_delta=4)
+    assert store.get_error_rate(task, operation_type=op_type, sample_type=metrics.SampleType.Normal) == 1.0
+
+
+def test_get_error_rate_sketch_counters_mixed(in_memory_metrics_store_sketch_path):
+    store = in_memory_metrics_store_sketch_path
+    task = "index #1"
+    op_type = track.OperationType.Bulk
+    key = store.aggregated_request_timing_sketch_key("service_time", task=task, operation_type=op_type)
+    sk = DDSketch()
+    sk.add(2.0)
+    store.merge_request_sketch_delta(key, sk, success_count_delta=7, failure_count_delta=3)
+    assert store.get_error_rate(task, operation_type=op_type, sample_type=metrics.SampleType.Normal) == pytest.approx(0.3)
+
+
+def test_get_error_rate_counters_take_precedence_over_service_time_docs(in_memory_metrics_store_sketch_path):
+    """Merged outcome tallies win when non-zero so sketch-only workers need not duplicate docs."""
+    store = in_memory_metrics_store_sketch_path
+    task = "index #1"
+    op_type = track.OperationType.Bulk
+    key = store.aggregated_request_timing_sketch_key("service_time", task=task, operation_type=op_type)
+    sk = DDSketch()
+    sk.add(3.0)
+    store.merge_request_sketch_delta(key, sk, success_count_delta=9, failure_count_delta=1)
+    store.put_value_cluster_level(
+        "service_time",
+        10.0,
+        "ms",
+        task=task,
+        operation_type=op_type,
+        sample_type=metrics.SampleType.Normal,
+        meta_data={"success": True},
+    )
+    store.put_value_cluster_level(
+        "service_time",
+        11.0,
+        "ms",
+        task=task,
+        operation_type=op_type,
+        sample_type=metrics.SampleType.Normal,
+        meta_data={"success": False},
+    )
+    assert store.get_error_rate(task, operation_type=op_type, sample_type=metrics.SampleType.Normal) == pytest.approx(0.1)
+
+
+def test_merge_request_sketch_outcome_counts_order_independent(in_memory_metrics_store_sketch_path):
+    store_a = in_memory_metrics_store_sketch_path
+    cfg = config.Config()
+    cfg.add(config.Scope.application, "system", "env.name", "unittest")
+    cfg.add(config.Scope.application, "track", "params", {})
+    store_b = metrics.InMemoryMetricsStore(cfg)
+    store_b.open(RACE_ID, RACE_TIMESTAMP, "test", "append-no-conflicts", "defaults", create=True)
+    task = "index #1"
+    op_type = track.OperationType.Bulk
+    key = store_a.aggregated_request_timing_sketch_key("service_time", task=task, operation_type=op_type)
+    assert key == store_b.aggregated_request_timing_sketch_key("service_time", task=task, operation_type=op_type)
+    da = DDSketch()
+    da.add(1.0)
+    db = DDSketch()
+    db.add(2.0)
+    store_a.merge_request_sketch_delta(key, da, success_count_delta=4, failure_count_delta=1)
+    store_a.merge_request_sketch_delta(key, db, success_count_delta=1, failure_count_delta=3)
+    store_b.merge_request_sketch_delta(key, db, success_count_delta=1, failure_count_delta=3)
+    store_b.merge_request_sketch_delta(key, da, success_count_delta=4, failure_count_delta=1)
+    sa = store_a._request_sketch_table[key]
+    sb = store_b._request_sketch_table[key]
+    assert sa.success_count == sb.success_count == 5
+    assert sa.failure_count == sb.failure_count == 4
+    assert sa.merged_sketch.count == sb.merged_sketch.count == 2
+    assert store_a.get_error_rate(task, operation_type=op_type, sample_type=metrics.SampleType.Normal) == pytest.approx(4 / 9)
+    assert store_b.get_error_rate(task, operation_type=op_type, sample_type=metrics.SampleType.Normal) == pytest.approx(4 / 9)
+
+
 def test_aggregated_latency_sketch_key_matches_request_timing_latency(in_memory_metrics_store_sketch_path):
     store = in_memory_metrics_store_sketch_path
     task = "t1"

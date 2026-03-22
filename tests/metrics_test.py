@@ -31,6 +31,7 @@ import elastic_transport
 import elasticsearch.exceptions
 import elasticsearch.helpers
 import pytest
+from ddsketch.ddsketch import DDSketch
 
 from esrally import client, config, exceptions, metrics, paths, track
 from esrally.metrics import GlobalStatsCalculator
@@ -2414,6 +2415,33 @@ class TestGlobalStatsCalculator:
 
         result = GlobalStatsCalculator(store=self.metrics_store, track=Track(name="geonames", meta_data={}), challenge=challenge)()
         assert "delete-index" in [op_metric.get("task") for op_metric in result.op_metrics]
+
+    def test_error_rate_from_merged_sketch_outcome_counters(self):
+        """T06: ``GlobalStatsCalculator`` reads error rate from merged success/failure counts (no service_time docs)."""
+        task_name = "index #1"
+        op = Operation("index", track.OperationType.Bulk)
+        task = Task(task_name, operation=op, schedule="deterministic")
+        challenge = Challenge(name="append-fast-with-conflicts", schedule=[task], meta_data={})
+        self.metrics_store.open(
+            self.RACE_ID,
+            self.RACE_TIMESTAMP,
+            "test",
+            "append-fast-with-conflicts",
+            "defaults",
+            create=True,
+        )
+        key = self.metrics_store.aggregated_request_timing_sketch_key("service_time", task=task_name, operation_type=op.type)
+        sk = DDSketch()
+        sk.add(8.0)
+        self.metrics_store.merge_request_sketch_delta(key, sk, success_count_delta=17, failure_count_delta=3)
+        result = GlobalStatsCalculator(
+            store=self.metrics_store,
+            track=Track(name="geonames", meta_data={}),
+            challenge=challenge,
+        )()
+        row = result.metrics(task_name)
+        assert row is not None
+        assert row["error_rate"] == pytest.approx(3 / 20)
 
 
 class TestGlobalStats:

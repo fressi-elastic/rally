@@ -81,10 +81,11 @@ Elasticsearch (``EsMetricsStore``)
 In-memory — **Option B (chosen)**
    ``InMemoryMetricsStore`` maintains **one merged DDSketch (and counts / sums as needed) per request-metric key**. Implementations of ``get_percentiles``, ``get_stats``, and ``get_mean`` for metric names such as ``latency``, ``service_time``, and ``processing_time`` **read from the sketch** when a sketch exists for the query filter; otherwise they **fall back** to scanning ``self.docs`` for **telemetry** and **legacy** races.
 
-   **Error rate:** ``get_error_rate`` today inspects ``service_time`` documents' ``meta.success``. Under Option B, either:
-
-   * maintain **explicit** ``success_count`` / ``error_count`` merged at the coordinator, or
-   * retain a **bounded** set of per-outcome documents (document the choice in the implementation and tests).
+   **Error rate:** ``get_error_rate`` inspects ``service_time`` documents' ``meta.success`` when no merged
+   outcome tallies exist. Option B uses **explicit** ``success_count`` / ``failure_count`` on
+   ``SketchState``, merged through ``InMemoryMetricsStore.merge_request_sketch_delta``; when their
+   sum is non-zero, those counts determine the rate for the Normal ``service_time`` stream (explicit
+   ``task`` and ``operation_type``).
 
 Sketch keys
 -----------

@@ -108,12 +108,13 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
+| **Status** | **Done** |
 | **Goal** | Implement chosen strategy (explicit counters vs minimal `service_time` docs). `get_error_rate` correct for sketch-only request path. |
 | **Start** | T05 merged. |
-| **Work** | Extend merge delta to carry success/failure counts; merge commutative. |
+| **Work** | ``merge_request_sketch_delta(..., success_count_delta=, failure_count_delta=)``; ``InMemoryMetricsStore.get_error_rate`` uses merged tallies when present. |
 | **End** | Document strategy in `distributed_request_metrics.rst` if changed. |
-| **Unit tests** | Merge deltas with only successes, only failures, mixed; assert rate. |
-| **Integration tests** | End-to-end with `GlobalStatsCalculator.error_rate` if feasible without full race. |
+| **Unit tests** | Merge deltas with only successes, only failures, mixed; assert rate; merge order independence. |
+| **Integration tests** | ``TestGlobalStatsCalculator.test_error_rate_from_merged_sketch_outcome_counters``. |
 | **Acceptance** | No regression on ES `get_error_rate` (unchanged code path). |
 
 ---

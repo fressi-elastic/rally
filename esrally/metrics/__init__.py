@@ -1270,20 +1270,34 @@ class InMemoryMetricsStore(MetricsStore):
             return None
         return state.merged_sketch
 
-    def merge_request_sketch_delta(self, key: RequestMetricSketchKey, delta: bytes | BaseDDSketch) -> None:
+    def merge_request_sketch_delta(
+        self,
+        key: RequestMetricSketchKey,
+        delta: bytes | BaseDDSketch,
+        *,
+        success_count_delta: int = 0,
+        failure_count_delta: int = 0,
+    ) -> None:
         """
         Merge serialized sketch bytes (or a live ``BaseDDSketch``) into ``_request_sketch_table``
-        for ``key``, updating :attr:`SketchState.merged_sketch`. Success/failure counters are
-        unchanged (reserved for error-rate / T06).
+        for ``key``, updating :attr:`SketchState.merged_sketch`.
+
+        Optional ``success_count_delta`` / ``failure_count_delta`` add request outcomes for the same
+        logical stream (Option B error rate). Merging is commutative: repeated calls with swapped
+        worker payloads yield the same counts and sketch (up to DDSketch numerical tolerance).
         """
+        if success_count_delta < 0 or failure_count_delta < 0:
+            raise ValueError("success_count_delta and failure_count_delta must be non-negative")
         incoming = deserialize_sketch(delta) if isinstance(delta, bytes) else delta
         if not isinstance(incoming, BaseDDSketch):
             raise TypeError("delta must be protobuf bytes or a BaseDDSketch instance")
         state = self._request_sketch_table.get(key)
         old = state.merged_sketch if state and state.merged_sketch is not None else DDSketch()
         merged = merge_sketches(old, incoming)
-        success_count = state.success_count if state else 0
-        failure_count = state.failure_count if state else 0
+        prev_s = state.success_count if state else 0
+        prev_f = state.failure_count if state else 0
+        success_count = prev_s + success_count_delta
+        failure_count = prev_f + failure_count_delta
         self._request_sketch_table[key] = SketchState(
             merged_sketch=merged,
             success_count=success_count,
@@ -1353,6 +1367,22 @@ class InMemoryMetricsStore(MetricsStore):
             return lower_score + (higher_score - lower_score) * fr
 
     def get_error_rate(self, task, operation_type=None, sample_type=None):
+        # Option B: merged success/failure counts for the Normal service_time stream (explicit task +
+        # operation_type) take precedence over scanning docs when any outcomes were merged.
+        if (
+            sample_type == SampleType.Normal
+            and operation_type is not None
+            and (
+                state := self._request_sketch_table.get(
+                    self.aggregated_request_timing_sketch_key("service_time", task=task, operation_type=operation_type)
+                )
+            )
+            is not None
+        ):
+            outcomes = state.success_count + state.failure_count
+            if outcomes > 0:
+                return state.failure_count / outcomes
+
         error = 0
         total_count = 0
         for doc in self.docs:
