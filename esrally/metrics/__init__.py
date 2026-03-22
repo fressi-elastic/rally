@@ -1182,6 +1182,19 @@ class EsMetricsStore(MetricsStore):
         return "Elasticsearch metrics store"
 
 
+def coordinator_skips_raw_sample_postprocessing(cfg: types.Config) -> bool:
+    """
+    When true, the coordinator keeps ``UpdateSamples`` for progress (``most_recent_sample_per_client``) but does not
+    retain raw samples or run :class:`~esrally.driver.driver.SamplePostprocessor` on the coordinator; workers write
+    request metrics to Elasticsearch instead.
+
+    Matches the same conditions as :func:`worker_elasticsearch_metrics_store_if_enabled` (flag plus Elasticsearch datastore).
+    """
+    if not convert.to_bool(cfg.opts("driver", "distributed.request.metrics", mandatory=False, default_value=False)):
+        return False
+    return cfg.opts("reporting", "datastore.type") == "elasticsearch"
+
+
 def worker_elasticsearch_metrics_store_if_enabled(
     cfg: types.Config,
     track_name: str,

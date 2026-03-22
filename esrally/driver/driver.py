@@ -1000,11 +1000,12 @@ class Driver:
             self.metrics_store.close()
 
     def update_samples(self, samples):
-        if len(samples) > 0:
+        if len(samples) == 0:
+            return
+        for s in samples:
+            self.most_recent_sample_per_client[s.client_id] = s
+        if not metrics.coordinator_skips_raw_sample_postprocessing(self.config):
             self.raw_samples += samples
-            # We need to check all samples, they will be from different clients
-            for s in samples:
-                self.most_recent_sample_per_client[s.client_id] = s
 
     def update_client_progress(self, snapshots: Sequence[ClientProgressSnapshot]) -> None:
         for snapshot in snapshots:
@@ -1035,6 +1036,10 @@ class Driver:
         # only a snapshot and that new data will go to a new sample set.
         raw_samples = self.raw_samples
         self.raw_samples = []
+        if metrics.coordinator_skips_raw_sample_postprocessing(self.config):
+            if self.metrics_store and self.metrics_store.opened:
+                self.metrics_store.flush(refresh=False)
+            return
         self.sample_post_processor(raw_samples)
 
 
@@ -1345,6 +1350,8 @@ class Worker(actor.RallyActor):
             if self.executor_future is not None:
                 self.executor_future.result()
             self.send_samples()
+            if self._worker_elasticsearch_metrics_store is not None and self._worker_elasticsearch_metrics_store.opened:
+                self._worker_elasticsearch_metrics_store.flush(refresh=False)
             self.cancel.clear()
             self.complete.clear()
             self.executor_future = None

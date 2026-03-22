@@ -183,6 +183,7 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
+| **Status** | **Done** |
 | **Goal** | With flag on, workers are sole writers for request metrics; `UpdateSamples` removed or carries no samples; `post_process_samples` skips request loop / throughput calculator; telemetry unchanged. |
 | **Start** | T10 merged. |
 | **Work** | Carefully flush worker stores at join points; driver `GlobalStatsCalculator` reads from ES (already remote). |
