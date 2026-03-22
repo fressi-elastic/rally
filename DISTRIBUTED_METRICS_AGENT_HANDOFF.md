@@ -153,6 +153,7 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
+| **Status** | **Done** |
 | **Goal** | Module implementing additive bucket merge (dict in → dict out), fixed width, coordinator epoch in constructor; unit-tested. |
 | **Start** | T08 merged. |
 | **Work** | No wiring to `Driver` yet. |
