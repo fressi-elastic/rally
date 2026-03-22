@@ -66,6 +66,7 @@ Rally's source code is available on `Github <https://github.com/elastic/rally>`_
    rally_daemon
    pipelines
    metrics
+   distributed_request_metrics
    summary_report
 
 .. toctree::
