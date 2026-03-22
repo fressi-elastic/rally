@@ -33,11 +33,12 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
+| **Status** | **Done** |
 | **Goal** | Declare the `ddsketch` (or agreed) package so CI and dev envs can import it. |
 | **Start** | Clean main; tests pass. |
 | **Work** | Add dependency in `pyproject.toml` / lockfile per project conventions. No Rally code changes except maybe `tests` import smoke. |
 | **End** | `pip install -e .[...]` resolves; import works. |
-| **Unit tests** | `tests/metrics/test_ddsketch_dependency.py` — `import ddsketch` (or package name) and construct default sketch, `accept(1.0)`, assert count. |
+| **Unit tests** | `tests/metrics/test_ddsketch_dependency.py` — `import ddsketch` (or package name) and construct default sketch, `add(1.0)` (ddsketch 3.x API), assert count. |
 | **Integration tests** | None required. |
 | **Acceptance** | CI installs deps without error. |
 
@@ -47,9 +48,10 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
+| **Status** | **Done** |
 | **Goal** | Pure helpers: key type, `merge(a,b)`, `serialize` / `deserialize` roundtrip, relative accuracy config constant. |
 | **Start** | T01 merged. |
-| **Work** | New module e.g. `esrally/metrics/sketch_utils.py` (name TBD). No `MetricsStore` coupling yet. |
+| **Work** | `esrally/metrics/` package: `sketch_utils.py` (+ `metrics.py` moved to `__init__.py`). No `MetricsStore` coupling yet. |
 | **End** | Module imported without side effects. |
 | **Unit tests** | `tests/metrics/test_sketch_utils.py` — merge commutativity / monotonic quantiles on synthetic data; serialization roundtrip; empty sketch edge cases. |
 | **Integration tests** | None. |

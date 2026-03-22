@@ -54,6 +54,9 @@ function main {
     add_license "ijson" "https://raw.githubusercontent.com/ICRAR/ijson/master/LICENSE.txt"
     add_license "google-resumable-media" "https://raw.githubusercontent.com/googleapis/google-resumable-media-python/main/LICENSE"
     add_license "google-auth" "https://raw.githubusercontent.com/googleapis/google-auth-library-python/main/LICENSE"
+    add_license "ddsketch" "https://raw.githubusercontent.com/DataDog/sketches-py/master/LICENSE"
+    # ddsketch[serialization] dependency
+    add_license "protobuf" "https://raw.githubusercontent.com/protocolbuffers/protobuf/main/LICENSE"
     add_license "zstandard" "https://github.com/indygreg/python-zstandard/blob/main/LICENSE"
 
     # transitive dependencies
