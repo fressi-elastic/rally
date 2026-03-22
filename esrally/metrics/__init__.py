@@ -28,6 +28,7 @@ import sys
 import uuid
 import zlib
 from enum import Enum, IntEnum
+from typing import Literal, cast, get_args
 
 import tabulate
 from ddsketch.ddsketch import BaseDDSketch, DDSketch
@@ -41,6 +42,10 @@ from esrally.metrics.sketch_utils import (
     sketch_sum_and_avg,
 )
 from esrally.utils import console, convert, io, pretty, versions
+
+# Sketch merge / read path for request timing streams (T05): same key convention as T04 latency-only.
+AggregatedRequestTimingSketchMetricName = Literal["latency", "service_time", "processing_time"]
+AGGREGATED_REQUEST_TIMING_SKETCH_METRIC_NAMES = frozenset(get_args(AggregatedRequestTimingSketchMetricName))
 
 
 class EsClient:
@@ -1206,30 +1211,60 @@ class InMemoryMetricsStore(MetricsStore):
         self._request_sketch_table.clear()
 
     @staticmethod
-    def aggregated_latency_sketch_key(task=None, operation_type=None) -> RequestMetricSketchKey:
+    def aggregated_request_timing_sketch_key(
+        metric_name: AggregatedRequestTimingSketchMetricName,
+        task=None,
+        operation_type=None,
+    ) -> RequestMetricSketchKey:
         """
-        Canonical :class:`RequestMetricSketchKey` for **latency** + :class:`SampleType.Normal` (T04).
+        Canonical :class:`RequestMetricSketchKey` for **latency**, **service_time**, or **processing_time**
+        with :class:`SampleType.Normal` (aggregated per task / operation-type stream).
 
         ``operation`` is always ``""``: the stream is the **aggregated** slice matching
         :meth:`_get` filters (``task``, ``operation-type``, ``sample-type``), not a single
         per-operation name. Workers and aggregators must use the same key when merging
         sketch deltas.
+
+        :param metric_name: Statically one of :class:`AggregatedRequestTimingSketchMetricName` /
+            :data:`AGGREGATED_REQUEST_TIMING_SKETCH_METRIC_NAMES`.
+        :raises ValueError: if ``metric_name`` is not allow-listed (defensive; callers with
+            dynamic ``str`` should ``cast`` after validating).
         """
+        if metric_name not in AGGREGATED_REQUEST_TIMING_SKETCH_METRIC_NAMES:
+            raise ValueError(f"metric_name must be one of {sorted(AGGREGATED_REQUEST_TIMING_SKETCH_METRIC_NAMES)!r}, got {metric_name!r}")
         return RequestMetricSketchKey(
-            metric_name="latency",
+            metric_name=metric_name,
             task=task or "",
             operation="",
             operation_type=operation_type or "",
             sample_type=SampleType.Normal.name.lower(),
         )
 
-    def _merged_latency_sketch_for_query(self, name, task, operation_type, sample_type):
+    @staticmethod
+    def aggregated_latency_sketch_key(task=None, operation_type=None) -> RequestMetricSketchKey:
+        """
+        Same as :meth:`aggregated_request_timing_sketch_key` with ``metric_name="latency"``.
+
+        Prefer :meth:`aggregated_request_timing_sketch_key` for new code.
+        """
+        return InMemoryMetricsStore.aggregated_request_timing_sketch_key("latency", task=task, operation_type=operation_type)
+
+    def _merged_request_timing_sketch_for_query(self, name, task, operation_type, sample_type):
         # Require explicit task and operation_type so sketch keys match unambiguous streams.
         # ``_get`` with ``task is None`` / ``operation_type is None`` aggregates across all
-        # values; that is not the same slice as ``aggregated_latency_sketch_key`` with "".
-        if name != "latency" or sample_type is not SampleType.Normal or task is None or operation_type is None:
+        # values; that is not the same slice as ``aggregated_request_timing_sketch_key(..., task="", ...)``.
+        if (
+            name not in AGGREGATED_REQUEST_TIMING_SKETCH_METRIC_NAMES
+            or sample_type is not SampleType.Normal
+            or task is None
+            or operation_type is None
+        ):
             return None
-        key = self.aggregated_latency_sketch_key(task=task, operation_type=operation_type)
+        key = self.aggregated_request_timing_sketch_key(
+            metric_name=cast(AggregatedRequestTimingSketchMetricName, name),
+            task=task,
+            operation_type=operation_type,
+        )
         state = self._request_sketch_table.get(key)
         if state is None or state.merged_sketch is None or state.merged_sketch.count == 0:
             return None
@@ -1280,7 +1315,7 @@ class InMemoryMetricsStore(MetricsStore):
     def get_percentiles(self, name, task=None, operation_type=None, sample_type=None, percentiles=None):
         if percentiles is None:
             percentiles = [99, 99.9, 100]
-        sketch = self._merged_latency_sketch_for_query(name, task, operation_type, sample_type)
+        sketch = self._merged_request_timing_sketch_for_query(name, task, operation_type, sample_type)
         if sketch is not None:
             result = collections.OrderedDict()
             for percentile in percentiles:
@@ -1337,7 +1372,7 @@ class InMemoryMetricsStore(MetricsStore):
             return 0.0
 
     def get_stats(self, name, task=None, operation_type=None, sample_type=SampleType.Normal):
-        sketch = self._merged_latency_sketch_for_query(name, task, operation_type, sample_type)
+        sketch = self._merged_request_timing_sketch_for_query(name, task, operation_type, sample_type)
         if sketch is not None:
             count = int(sketch.count)
             total_sum, avg = sketch_sum_and_avg(sketch)

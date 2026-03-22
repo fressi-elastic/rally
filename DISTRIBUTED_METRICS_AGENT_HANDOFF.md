@@ -93,9 +93,10 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
+| **Status** | **Done** |
 | **Goal** | Same as T04 for `service_time` and `processing_time`. |
 | **Start** | T04 merged. |
-| **Work** | Generalize routing by `name` in allow-list. |
+| **Work** | Allow-list `AGGREGATED_REQUEST_TIMING_SKETCH_METRIC_NAMES`; `aggregated_request_timing_sketch_key`; `_merged_request_timing_sketch_for_query` routes `get_percentiles` / `get_stats` (and thus `get_mean`) like T04 latency. |
 | **End** | T04 tests still pass. |
 | **Unit tests** | Parametrized tests over metric names. |
 | **Integration tests** | One combined test hitting all three names. |

@@ -61,10 +61,6 @@ def in_memory_metrics_store_sketch_path():
     return ms
 
 
-def _aggregated_latency_key(store, task, operation_type):
-    return store.aggregated_latency_sketch_key(task=task, operation_type=operation_type)
-
-
 def test_request_metric_sketch_key_is_named_tuple():
     k = RequestMetricSketchKey(
         metric_name="latency",
@@ -189,12 +185,15 @@ def test_sketch_sum_and_avg_recover_after_protobuf_deserialize():
     assert avg == pytest.approx(50.5, rel=REQUEST_METRIC_SKETCH_RELATIVE_ACCURACY * 2)
 
 
-def test_merge_serialized_sketch_deltas_get_stats_mean_near_reference(in_memory_metrics_store_sketch_path):
+@pytest.mark.parametrize("metric_name", ("latency", "service_time", "processing_time"))
+def test_merge_serialized_sketch_deltas_get_stats_mean_near_reference(
+    in_memory_metrics_store_sketch_path, metric_name: metrics.AggregatedRequestTimingSketchMetricName
+):
     """Wire bytes lose exact ``sum``/``avg``; :func:`sketch_sum_and_avg` restores approximate stats."""
     store = in_memory_metrics_store_sketch_path
     task = "index #1"
     op_type = track.OperationType.Bulk
-    key = _aggregated_latency_key(store, task, op_type)
+    key = store.aggregated_request_timing_sketch_key(metric_name, task=task, operation_type=op_type)
 
     a = DDSketch()
     for v in range(1, 51):
@@ -206,17 +205,20 @@ def test_merge_serialized_sketch_deltas_get_stats_mean_near_reference(in_memory_
     store.merge_request_sketch_delta(key, serialize_sketch(a))
     store.merge_request_sketch_delta(key, serialize_sketch(b))
 
-    stats = store.get_stats("latency", task=task, operation_type=op_type, sample_type=metrics.SampleType.Normal)
+    stats = store.get_stats(metric_name, task=task, operation_type=op_type, sample_type=metrics.SampleType.Normal)
     assert stats["count"] == 100
     assert stats["avg"] == pytest.approx(50.5, rel=_PCT_TOL)
     assert stats["sum"] == pytest.approx(50.5 * 100, rel=_PCT_TOL)
 
 
-def test_merge_two_sketch_deltas_percentiles_within_ddsketch_accuracy(in_memory_metrics_store_sketch_path):
+@pytest.mark.parametrize("metric_name", ("latency", "service_time", "processing_time"))
+def test_merge_two_sketch_deltas_percentiles_within_ddsketch_accuracy(
+    in_memory_metrics_store_sketch_path, metric_name: metrics.AggregatedRequestTimingSketchMetricName
+):
     store = in_memory_metrics_store_sketch_path
     task = "index #1"
     op_type = track.OperationType.Bulk
-    key = _aggregated_latency_key(store, task, op_type)
+    key = store.aggregated_request_timing_sketch_key(metric_name, task=task, operation_type=op_type)
 
     a = DDSketch()
     for v in range(1, 51):
@@ -236,7 +238,7 @@ def test_merge_two_sketch_deltas_percentiles_within_ddsketch_accuracy(in_memory_
         ref[p] = metrics.InMemoryMetricsStore.percentile_value(sorted_raw, p)
 
     got = store.get_percentiles(
-        "latency",
+        metric_name,
         task=task,
         operation_type=op_type,
         sample_type=metrics.SampleType.Normal,
@@ -247,18 +249,21 @@ def test_merge_two_sketch_deltas_percentiles_within_ddsketch_accuracy(in_memory_
         assert got[p] == pytest.approx(ref[p], rel=_PCT_TOL), f"percentile {p}"
 
 
-def test_docs_only_latency_unchanged_no_sketch_merge(in_memory_metrics_store_sketch_path):
+@pytest.mark.parametrize("metric_name", ("latency", "service_time", "processing_time"))
+def test_docs_only_timing_metric_unchanged_no_sketch_merge(
+    in_memory_metrics_store_sketch_path, metric_name: metrics.AggregatedRequestTimingSketchMetricName
+):
     """No ``merge_request_sketch_delta``: legacy doc scan only (sketch table empty)."""
     store = in_memory_metrics_store_sketch_path
     task = "index #1"
     op_type = track.OperationType.Bulk
-    store.put_value_cluster_level("latency", 10.0, "ms", task=task, operation_type=op_type)
-    store.put_value_cluster_level("latency", 20.0, "ms", task=task, operation_type=op_type)
-    store.put_value_cluster_level("latency", 30.0, "ms", task=task, operation_type=op_type)
+    store.put_value_cluster_level(metric_name, 10.0, "ms", task=task, operation_type=op_type)
+    store.put_value_cluster_level(metric_name, 20.0, "ms", task=task, operation_type=op_type)
+    store.put_value_cluster_level(metric_name, 30.0, "ms", task=task, operation_type=op_type)
 
     assert store._request_sketch_table == {}
 
-    values = store.get("latency", task=task, operation_type=op_type, sample_type=metrics.SampleType.Normal)
+    values = store.get(metric_name, task=task, operation_type=op_type, sample_type=metrics.SampleType.Normal)
     sorted_raw = sorted(values)
     percentiles = [50, 100]
     ref = collections.OrderedDict()
@@ -266,7 +271,7 @@ def test_docs_only_latency_unchanged_no_sketch_merge(in_memory_metrics_store_ske
         ref[p] = metrics.InMemoryMetricsStore.percentile_value(sorted_raw, p)
 
     got = store.get_percentiles(
-        "latency",
+        metric_name,
         task=task,
         operation_type=op_type,
         sample_type=metrics.SampleType.Normal,
@@ -275,7 +280,7 @@ def test_docs_only_latency_unchanged_no_sketch_merge(in_memory_metrics_store_ske
     assert got[50] == ref[50]
     assert got[100] == ref[100]
 
-    stats = store.get_stats("latency", task=task, operation_type=op_type, sample_type=metrics.SampleType.Normal)
+    stats = store.get_stats(metric_name, task=task, operation_type=op_type, sample_type=metrics.SampleType.Normal)
     assert stats["count"] == 3
     assert stats["min"] == 10.0
     assert stats["max"] == 30.0
@@ -283,12 +288,15 @@ def test_docs_only_latency_unchanged_no_sketch_merge(in_memory_metrics_store_ske
     assert stats["sum"] == pytest.approx(60.0)
 
 
-def test_sketch_only_get_stats_get_mean_get_percentiles_single_latency_sequence(in_memory_metrics_store_sketch_path):
-    """Mirrors ``GlobalStatsCalculator.single_latency``: ``get_stats`` then percentiles + mean."""
+@pytest.mark.parametrize("metric_name", ("latency", "service_time", "processing_time"))
+def test_sketch_only_get_stats_get_mean_get_percentiles_single_timing_sequence(
+    in_memory_metrics_store_sketch_path, metric_name: metrics.AggregatedRequestTimingSketchMetricName
+):
+    """Mirrors ``GlobalStatsCalculator`` timing paths: ``get_stats`` then percentiles + mean."""
     store = in_memory_metrics_store_sketch_path
     task = "index #1"
     op_type = track.OperationType.Bulk
-    key = _aggregated_latency_key(store, task, op_type)
+    key = store.aggregated_request_timing_sketch_key(metric_name, task=task, operation_type=op_type)
 
     sk = DDSketch()
     for v in (2.0, 4.0, 8.0, 16.0):
@@ -296,7 +304,7 @@ def test_sketch_only_get_stats_get_mean_get_percentiles_single_latency_sequence(
     store.merge_request_sketch_delta(key, sk)
 
     st = metrics.SampleType.Normal
-    stats = store.get_stats("latency", task=task, operation_type=op_type, sample_type=st)
+    stats = store.get_stats(metric_name, task=task, operation_type=op_type, sample_type=st)
     assert stats["count"] == 4
     assert stats["avg"] == pytest.approx(sk.avg, rel=_PCT_TOL)
     assert stats["sum"] == pytest.approx(sk.sum, rel=_PCT_TOL)
@@ -304,8 +312,8 @@ def test_sketch_only_get_stats_get_mean_get_percentiles_single_latency_sequence(
     sample_size = stats["count"]
     assert sample_size > 0
     pct_list = metrics.percentiles_for_sample_size(sample_size)
-    percentiles = store.get_percentiles("latency", task=task, operation_type=op_type, sample_type=st, percentiles=pct_list)
-    mean = store.get_mean("latency", task=task, operation_type=op_type, sample_type=st)
+    percentiles = store.get_percentiles(metric_name, task=task, operation_type=op_type, sample_type=st, percentiles=pct_list)
+    mean = store.get_mean(metric_name, task=task, operation_type=op_type, sample_type=st)
 
     assert mean == pytest.approx(stats["avg"], rel=_PCT_TOL)
     for p, v in percentiles.items():
@@ -313,28 +321,75 @@ def test_sketch_only_get_stats_get_mean_get_percentiles_single_latency_sequence(
         assert v == pytest.approx(sk.get_quantile_value(q), rel=_PCT_TOL)
 
 
-def test_merge_accepts_live_sketch_instance(in_memory_metrics_store_sketch_path):
+@pytest.mark.parametrize("metric_name", ("latency", "service_time", "processing_time"))
+def test_merge_accepts_live_sketch_instance(
+    in_memory_metrics_store_sketch_path, metric_name: metrics.AggregatedRequestTimingSketchMetricName
+):
     store = in_memory_metrics_store_sketch_path
     task = "t1"
     op_type = track.OperationType.Search
-    key = _aggregated_latency_key(store, task, op_type)
+    key = store.aggregated_request_timing_sketch_key(metric_name, task=task, operation_type=op_type)
     s = DDSketch()
     s.add(42.0)
     store.merge_request_sketch_delta(key, s)
     assert store._request_sketch_table[key].merged_sketch.count == 1
 
 
-def test_latency_sketch_not_used_when_sample_type_unspecified(in_memory_metrics_store_sketch_path):
+def test_merge_all_three_request_timing_sketches_on_same_store(in_memory_metrics_store_sketch_path):
+    """Independent merged sketches for latency, service_time, and processing_time on one store."""
+    store = in_memory_metrics_store_sketch_path
+    task = "index #1"
+    op_type = track.OperationType.Bulk
+    st = metrics.SampleType.Normal
+    configs: tuple[tuple[metrics.AggregatedRequestTimingSketchMetricName, range], ...] = (
+        ("latency", range(1, 101)),
+        ("service_time", range(100, 200)),
+        ("processing_time", range(200, 300)),
+    )
+    for metric_name, values in configs:
+        key = store.aggregated_request_timing_sketch_key(metric_name, task=task, operation_type=op_type)
+        sk = DDSketch()
+        for v in values:
+            sk.add(float(v))
+        store.merge_request_sketch_delta(key, sk)
+
+    assert store.get_stats("latency", task=task, operation_type=op_type, sample_type=st)["avg"] == pytest.approx(50.5, rel=_PCT_TOL)
+    assert store.get_stats("service_time", task=task, operation_type=op_type, sample_type=st)["avg"] == pytest.approx(149.5, rel=_PCT_TOL)
+    assert store.get_stats("processing_time", task=task, operation_type=op_type, sample_type=st)["avg"] == pytest.approx(
+        249.5, rel=_PCT_TOL
+    )
+
+    for metric_name, values in configs:
+        raw = [float(x) for x in values]
+        sorted_raw = sorted(raw)
+        p50_ref = metrics.InMemoryMetricsStore.percentile_value(sorted_raw, 50)
+        got = store.get_percentiles(metric_name, task=task, operation_type=op_type, sample_type=st, percentiles=[50])
+        assert got[50] == pytest.approx(p50_ref, rel=_PCT_TOL), metric_name
+
+
+@pytest.mark.parametrize("metric_name", ("latency", "service_time", "processing_time"))
+def test_request_timing_sketch_not_used_when_sample_type_unspecified(
+    in_memory_metrics_store_sketch_path, metric_name: metrics.AggregatedRequestTimingSketchMetricName
+):
     """``get_percentiles`` defaults ``sample_type`` to None → legacy path (not Normal-only sketch)."""
     store = in_memory_metrics_store_sketch_path
     task = "index #1"
     op_type = track.OperationType.Bulk
-    key = _aggregated_latency_key(store, task, op_type)
+    key = store.aggregated_request_timing_sketch_key(metric_name, task=task, operation_type=op_type)
     sk = DDSketch()
     sk.add(99.0)
     store.merge_request_sketch_delta(key, sk)
 
-    store.put_value_cluster_level("latency", 1.0, "ms", task=task, operation_type=op_type)
+    store.put_value_cluster_level(metric_name, 1.0, "ms", task=task, operation_type=op_type)
 
-    got = store.get_percentiles("latency", task=task, operation_type=op_type, percentiles=[100])
+    got = store.get_percentiles(metric_name, task=task, operation_type=op_type, percentiles=[100])
     assert got[100] == pytest.approx(1.0)
+
+
+def test_aggregated_latency_sketch_key_matches_request_timing_latency(in_memory_metrics_store_sketch_path):
+    store = in_memory_metrics_store_sketch_path
+    task = "t1"
+    op_type = track.OperationType.Bulk
+    assert store.aggregated_latency_sketch_key(task=task, operation_type=op_type) == store.aggregated_request_timing_sketch_key(
+        "latency", task=task, operation_type=op_type
+    )
