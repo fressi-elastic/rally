@@ -21,9 +21,11 @@ import datetime
 import json
 import logging
 import os
+import pickle
 import random
 import tempfile
 import uuid
+import zlib
 from dataclasses import dataclass
 from unittest import mock
 
@@ -1921,6 +1923,61 @@ class TestInMemoryMetricsStore:
         self.metrics_store.bulk_add(memento)
         assert len(self.metrics_store.docs) == 1
         assert self.metrics_store.get_one("final_index_size") == 1000
+
+    def test_legacy_list_memento_bulk_add(self):
+        """Pre–T13 pickles stored a bare doc list; :meth:`InMemoryMetricsStore.bulk_add` must still load them."""
+        self.metrics_store.open(
+            self.RACE_ID,
+            self.RACE_TIMESTAMP,
+            "test",
+            "append-no-conflicts",
+            "defaults",
+            create=True,
+        )
+        self.metrics_store.put_value_cluster_level("final_index_size", 42, "GB")
+        legacy = zlib.compress(pickle.dumps(self.metrics_store.docs))
+        self.metrics_store.close()
+        del self.metrics_store
+
+        self.metrics_store = metrics.InMemoryMetricsStore(self.cfg, clock=StaticClock)
+        self.metrics_store.bulk_add(legacy)
+        assert self.metrics_store.get_one("final_index_size") == 42
+
+    def test_externalize_roundtrips_request_sketch_table(self):
+        self.metrics_store.open(
+            self.RACE_ID,
+            self.RACE_TIMESTAMP,
+            "test",
+            "append-no-conflicts",
+            "defaults",
+            create=True,
+        )
+        task_name = "index #1"
+        op_type = track.OperationType.Bulk
+        key = self.metrics_store.aggregated_request_timing_sketch_key("latency", task=task_name, operation_type=op_type)
+        sk = DDSketch()
+        sk.add(12.0)
+        sk.add(18.0)
+        self.metrics_store.merge_request_sketch_delta(key, sk, success_count_delta=0, failure_count_delta=0)
+
+        memento = self.metrics_store.to_externalizable()
+        self.metrics_store.close()
+        del self.metrics_store
+
+        restored = metrics.InMemoryMetricsStore(self.cfg, clock=StaticClock)
+        restored.bulk_add(memento)
+        stats = restored.get_stats("latency", task=task_name, operation_type=op_type, sample_type=metrics.SampleType.Normal)
+        assert stats is not None
+        assert stats["count"] == 2
+        p = restored.get_percentiles(
+            "latency",
+            task=task_name,
+            operation_type=op_type,
+            sample_type=metrics.SampleType.Normal,
+            percentiles=[100],
+        )
+        assert p[100] == pytest.approx(18.0, rel=0.05)
+        self.metrics_store = restored
 
     def test_meta_data_per_document(self):
         self.metrics_store.open(

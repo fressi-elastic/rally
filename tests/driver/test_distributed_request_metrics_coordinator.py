@@ -38,7 +38,8 @@ def _base_cfg():
     "flag, datastore, expected",
     [
         (False, "elasticsearch", False),
-        (True, "in-memory", False),
+        (False, "in-memory", False),
+        (True, "in-memory", True),
         (True, "elasticsearch", True),
     ],
 )
@@ -62,15 +63,15 @@ def test_update_samples_es_flag_skips_raw_samples_but_keeps_progress():
     assert d.most_recent_sample_per_client == {0: s0, 1: s1}
 
 
-def test_update_samples_in_memory_accumulates_raw_samples():
+def test_update_samples_in_memory_distributed_skips_raw_samples_but_keeps_progress():
     cfg = _base_cfg()
     cfg.add(config.Scope.application, "driver", "distributed.request.metrics", True)
     cfg.add(config.Scope.application, "reporting", "datastore.type", "in-memory")
 
     d = driver.Driver(mock.Mock(), cfg, es_client_factory_class=mock.Mock)
-    s0 = mock.Mock(client_id=0)
+    s0 = mock.Mock(client_id=0, percent_completed=0.1)
     d.update_samples([s0])
-    assert d.raw_samples == [s0]
+    assert d.raw_samples == []
     assert d.most_recent_sample_per_client[0] is s0
 
 
@@ -78,6 +79,25 @@ def test_post_process_samples_es_flag_flushes_without_post_processor():
     cfg = _base_cfg()
     cfg.add(config.Scope.application, "driver", "distributed.request.metrics", True)
     cfg.add(config.Scope.application, "reporting", "datastore.type", "elasticsearch")
+
+    d = driver.Driver(mock.Mock(), cfg, es_client_factory_class=mock.Mock)
+    d.metrics_store = mock.Mock()
+    d.metrics_store.opened = True
+    pp = mock.Mock()
+    d.sample_post_processor = pp
+    d.raw_samples = [mock.Mock()]
+
+    d.post_process_samples()
+
+    pp.assert_not_called()
+    d.metrics_store.flush.assert_called_once_with(refresh=False)
+    assert d.raw_samples == []
+
+
+def test_post_process_samples_in_memory_distributed_skips_post_processor():
+    cfg = _base_cfg()
+    cfg.add(config.Scope.application, "driver", "distributed.request.metrics", True)
+    cfg.add(config.Scope.application, "reporting", "datastore.type", "in-memory")
 
     d = driver.Driver(mock.Mock(), cfg, es_client_factory_class=mock.Mock)
     d.metrics_store = mock.Mock()

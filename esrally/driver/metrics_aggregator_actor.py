@@ -17,8 +17,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import thespian.actors  # type: ignore[import-untyped]
 
 from esrally import actor, metrics, types
@@ -44,7 +42,8 @@ class MetricsAggregatorActor(actor.RallyActor):
     """
     Coordinator-side merge of sketch and throughput-bucket deltas into an in-memory metrics store.
 
-    Created only when ``driver.metrics.aggregator`` is true; workers are not wired to this actor yet (T13+).
+    Created only when ``driver.metrics.aggregator`` is true. With distributed in-memory Option B (T13), workers merge
+    sketches into the coordinator :class:`~esrally.driver.driver.Driver` metrics store instead of this actor.
     """
 
     def __init__(self):
@@ -53,7 +52,7 @@ class MetricsAggregatorActor(actor.RallyActor):
         self._throughput_totals: dict[ThroughputBucketKey, int] | None = None
 
     @actor.no_retry("metrics aggregator")  # pylint: disable=no-value-for-parameter
-    def receiveMsg_BootstrapMetricsAggregator(self, msg: BootstrapMetricsAggregator, sender: Any) -> None:
+    def receiveMsg_BootstrapMetricsAggregator(self, msg: BootstrapMetricsAggregator, sender: thespian.actors.ActorAddress) -> None:
         store = metrics.InMemoryMetricsStore(cfg=msg.config)
         race_id = msg.config.opts("system", "race.id")
         race_timestamp = msg.config.opts("system", "time.start")
@@ -70,21 +69,21 @@ class MetricsAggregatorActor(actor.RallyActor):
         self._throughput_totals = {}
 
     @actor.no_retry("metrics aggregator")  # pylint: disable=no-value-for-parameter
-    def receiveMsg_RequestSketchMergeDelta(self, msg: RequestSketchMergeDelta, sender: Any) -> None:
+    def receiveMsg_RequestSketchMergeDelta(self, msg: RequestSketchMergeDelta, sender: thespian.actors.ActorAddress) -> None:
         if self._metrics_store is None:
             self.logger.warning("RequestSketchMergeDelta before bootstrap; ignoring.")
             return
         apply_sketch_merge_delta(self._metrics_store, msg)
 
     @actor.no_retry("metrics aggregator")  # pylint: disable=no-value-for-parameter
-    def receiveMsg_ThroughputBucketMergeDelta(self, msg: ThroughputBucketMergeDelta, sender: Any) -> None:
+    def receiveMsg_ThroughputBucketMergeDelta(self, msg: ThroughputBucketMergeDelta, sender: thespian.actors.ActorAddress) -> None:
         if self._throughput_totals is None:
             self.logger.warning("ThroughputBucketMergeDelta before bootstrap; ignoring.")
             return
         self._throughput_totals = apply_throughput_bucket_deltas(self._throughput_totals, msg.buckets)
 
     @actor.no_retry("metrics aggregator")  # pylint: disable=no-value-for-parameter
-    def receiveMsg_ActorExitRequest(self, msg: thespian.actors.ActorExitRequest, sender: Any) -> None:
+    def receiveMsg_ActorExitRequest(self, msg: thespian.actors.ActorExitRequest, sender: thespian.actors.ActorAddress) -> None:
         if self._metrics_store is not None and self._metrics_store.opened:
             self._metrics_store.close()
         self._metrics_store = None

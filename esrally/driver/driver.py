@@ -49,6 +49,10 @@ from esrally import (
 )
 from esrally.client import delete_api_keys
 from esrally.driver import runner, scheduler
+from esrally.driver.metrics_aggregator import (
+    apply_sketch_merge_delta,
+    request_sketch_merge_deltas_from_samples,
+)
 from esrally.driver.metrics_aggregator_actor import (
     BootstrapMetricsAggregator,
     MetricsAggregatorActor,
@@ -329,6 +333,14 @@ class DriverActor(actor.RallyActor):  # pylint: disable=too-many-public-methods
     @actor.no_retry("driver")  # pylint: disable=no-value-for-parameter
     def receiveMsg_UpdateSamples(self, msg, sender):
         self.driver.update_samples(msg.samples)
+
+    @actor.no_retry("driver")  # pylint: disable=no-value-for-parameter
+    def receiveMsg_RequestSketchMergeDelta(self, msg, sender):
+        if self.driver is None:
+            return
+        store = self.driver.metrics_store
+        if isinstance(store, metrics.InMemoryMetricsStore) and store.opened:
+            apply_sketch_merge_delta(store, msg)
 
     @actor.no_retry("driver")  # pylint: disable=no-value-for-parameter
     def receiveMsg_ProgressUpdate(self, msg, sender):
@@ -1223,6 +1235,7 @@ class Worker(actor.RallyActor):
         self.wakeup_interval = Worker.WAKEUP_INTERVAL_SECONDS
         self.sample_queue_size = None
         self._worker_elasticsearch_metrics_store = None
+        self._request_metrics_downsample_factor = 1
 
     @actor.no_retry("worker")  # pylint: disable=no-value-for-parameter
     def receiveMsg_Bootstrap(self, msg, sender):
@@ -1245,6 +1258,9 @@ class Worker(actor.RallyActor):
         self.client_contexts = msg.client_contexts
         self.current_task_index = 0
         self.cancel.clear()
+        self._request_metrics_downsample_factor = int(
+            self.config.opts("reporting", "metrics.request.downsample.factor", mandatory=False, default_value=1)
+        )
         challenge = select_challenge(self.config, self.track)
         self._worker_elasticsearch_metrics_store = metrics.worker_elasticsearch_metrics_store_if_enabled(
             self.config, self.track.name, challenge.name
@@ -1413,6 +1429,13 @@ class Worker(actor.RallyActor):
             samples = self.sampler.samples
             if len(samples) > 0:
                 self.send(self.driver_actor, UpdateSamples(self.worker_id, samples))
+                cfg = self.config
+                assert cfg is not None
+                if metrics.coordinator_skips_raw_sample_postprocessing(cfg) and cfg.opts("reporting", "datastore.type") == "in-memory":
+                    for delta in request_sketch_merge_deltas_from_samples(
+                        samples, downsample_factor=self._request_metrics_downsample_factor
+                    ):
+                        self.send(self.driver_actor, delta)
             return samples
         return None
 

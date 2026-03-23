@@ -213,6 +213,7 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
+| **Status** | **Done** |
 | **Goal** | With `datastore.type=in-memory` and distributed flag, coordinator receives only sketch deltas; `to_externalizable` / race pickle includes sketch state OR expanded summary — define format; **reports** still work. |
 | **Start** | T12 merged (or T11 if aggregator skipped). |
 | **Work** | Wire `merge_request_sketch_delta` from messages; ensure `GlobalStatsCalculator` uses sketch getters. |
@@ -220,6 +221,12 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 | **Unit tests** | Full `InMemoryMetricsStore` sketch path + `GlobalStatsCalculator` on synthetic race. |
 | **Integration tests** | Mini race benchmark in test mode. |
 | **Acceptance** | Memory bound independent of sample count (smoke: N=1e5 simulated accepts). |
+
+**Notes (implementation):**
+
+- `coordinator_skips_raw_sample_postprocessing` is true for distributed flag + **both** `elasticsearch` and `in-memory` datastores. Workers send `RequestSketchMergeDelta` to `DriverActor`, which merges into the coordinator `Driver.metrics_store` (`InMemoryMetricsStore`). `to_externalizable` / `bulk_add` use a tagged tuple (`imms_sketch_v1`, docs, sketch table); legacy bare-list pickles still load.
+- `InMemoryMetricsStore.get_unit` returns `"ms"` when a merged timing sketch is present (so `GlobalStatsCalculator.single_latency` gets a unit without request docs).
+- **Throughput:** not merged on the in-memory coordinator path in this change; `ThroughputBucketMergeDelta` / `put_value_cluster_level` for throughput remain a follow-up if parity with the post-processor path is required for distributed in-memory reports.
 
 ---
 

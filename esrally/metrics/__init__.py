@@ -47,6 +47,9 @@ from esrally.utils import console, convert, io, pretty, versions
 AggregatedRequestTimingSketchMetricName = Literal["latency", "service_time", "processing_time"]
 AGGREGATED_REQUEST_TIMING_SKETCH_METRIC_NAMES = frozenset(get_args(AggregatedRequestTimingSketchMetricName))
 
+# Pickle memento for InMemoryMetricsStore: legacy payload is a bare list of docs; tagged tuples add sketch state (T13).
+INMEMORY_METRICS_STORE_SKETCH_MEMENTO_V1 = "imms_sketch_v1"
+
 
 class EsClient:
     """
@@ -1185,14 +1188,16 @@ class EsMetricsStore(MetricsStore):
 def coordinator_skips_raw_sample_postprocessing(cfg: types.Config) -> bool:
     """
     When true, the coordinator keeps ``UpdateSamples`` for progress (``most_recent_sample_per_client``) but does not
-    retain raw samples or run :class:`~esrally.driver.driver.SamplePostprocessor` on the coordinator; workers write
-    request metrics to Elasticsearch instead.
+    retain raw samples or run :class:`~esrally.driver.driver.SamplePostprocessor` on the coordinator.
 
-    Matches the same conditions as :func:`worker_elasticsearch_metrics_store_if_enabled` (flag plus Elasticsearch datastore).
+    With ``reporting.datastore.type=elasticsearch``, workers write request metrics to Elasticsearch. With
+    ``in-memory``, workers send :class:`~esrally.driver.metrics_aggregator.RequestSketchMergeDelta` messages and the
+    coordinator merges into :class:`InMemoryMetricsStore` (Option B, T13).
     """
     if not convert.to_bool(cfg.opts("driver", "distributed.request.metrics", mandatory=False, default_value=False)):
         return False
-    return cfg.opts("reporting", "datastore.type") == "elasticsearch"
+    ds = cfg.opts("reporting", "datastore.type")
+    return ds in ("elasticsearch", "in-memory")
 
 
 def worker_elasticsearch_metrics_store_if_enabled(
@@ -1362,15 +1367,47 @@ class InMemoryMetricsStore(MetricsStore):
     def flush(self, refresh=True):
         pass
 
+    def bulk_add(self, memento):
+        if not memento:
+            return
+        self.logger.debug("Restoring in-memory representation of metrics store.")
+        payload = pickle.loads(zlib.decompress(memento))
+        if isinstance(payload, list):
+            for doc in payload:
+                self._add(doc)
+        elif isinstance(payload, tuple) and len(payload) == 3 and payload[0] == INMEMORY_METRICS_STORE_SKETCH_MEMENTO_V1:
+            _, docs, sketch_table = payload
+            for doc in docs:
+                self._add(doc)
+            self._request_sketch_table.clear()
+            self._request_sketch_table.update(sketch_table)
+        else:
+            raise ValueError(f"Unrecognized in-memory metrics store memento format: {type(payload)!r}")
+
     def to_externalizable(self, clear=False):
         docs = self.docs
+        sketch_table = dict(self._request_sketch_table)
         if clear:
             self.docs = []
-        compressed = zlib.compress(pickle.dumps(docs))
+            self._request_sketch_table.clear()
+        payload = (INMEMORY_METRICS_STORE_SKETCH_MEMENTO_V1, docs, sketch_table)
+        compressed = zlib.compress(pickle.dumps(payload))
         self.logger.debug(
-            "Compression changed size of metric store from [%d] bytes to [%d] bytes", sys.getsizeof(docs, -1), sys.getsizeof(compressed, -1)
+            "Compression changed size of metric store from [%d] bytes to [%d] bytes",
+            sys.getsizeof(payload, -1),
+            sys.getsizeof(compressed, -1),
         )
         return compressed
+
+    def get_unit(self, name, task=None, operation_type=None, node_name=None):
+        if (
+            name in AGGREGATED_REQUEST_TIMING_SKETCH_METRIC_NAMES
+            and task is not None
+            and operation_type is not None
+            and self._merged_request_timing_sketch_for_query(name, task, operation_type, SampleType.Normal) is not None
+        ):
+            return "ms"
+        return self._first_or_none(self._get(name, task, operation_type, None, node_name, lambda doc: doc["unit"]))
 
     def get_percentiles(self, name, task=None, operation_type=None, sample_type=None, percentiles=None):
         if percentiles is None:
