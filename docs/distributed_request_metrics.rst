@@ -112,7 +112,7 @@ Configuration (illustrative)
 New settings may include (exact names TBD):
 
 * ``driver.distributed_request_metrics`` — enable distributed request path.
-* ``driver.metrics_aggregator`` — use ``MetricsAggregatorActor`` vs direct worker → store.
+* ``driver.metrics.aggregator`` — create coordinator ``MetricsAggregatorActor`` (merge path; workers wired in later tasks).
 * ``reporting.sketch.flush_interval_seconds`` — worker local flush period.
 * Sketch accuracy parameters (DDSketch relative accuracy).
 

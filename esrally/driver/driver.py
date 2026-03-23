@@ -49,6 +49,10 @@ from esrally import (
 )
 from esrally.client import delete_api_keys
 from esrally.driver import runner, scheduler
+from esrally.driver.metrics_aggregator_actor import (
+    BootstrapMetricsAggregator,
+    MetricsAggregatorActor,
+)
 from esrally.driver.request_metrics import RequestMetricsRecorder
 from esrally.track import TrackProcessorRegistry, load_track, load_track_plugins
 from esrally.utils import console, convert, net
@@ -253,6 +257,7 @@ class DriverActor(actor.RallyActor):  # pylint: disable=too-many-public-methods
         super().__init__()
         self.benchmark_actor = None
         self.driver = None
+        self.metrics_aggregator_actor = None
         self.status = "init"
         self.post_process_timer = 0
         self.cluster_details = {}
@@ -296,6 +301,14 @@ class DriverActor(actor.RallyActor):  # pylint: disable=too-many-public-methods
         self.benchmark_actor = sender
         self.driver = Driver(self, msg.config)
         self.driver.prepare_benchmark(msg.track)
+        if convert.to_bool(msg.config.opts("driver", "metrics.aggregator", mandatory=False, default_value=False)):
+            addr = self.createActor(MetricsAggregatorActor, targetActorRequirements={"coordinator": True})
+            self.metrics_aggregator_actor = addr
+            self.driver.metrics_aggregator_actor = addr
+            self.send(
+                addr,
+                BootstrapMetricsAggregator(msg.config, msg.track.name, self.driver.challenge.name),
+            )
 
     @actor.no_retry("driver")  # pylint: disable=no-value-for-parameter
     def receiveMsg_StartBenchmark(self, msg, sender):
@@ -625,6 +638,7 @@ class Driver:
         self.raw_samples = []
         self.most_recent_sample_per_client = {}
         self.sample_post_processor = None
+        self.metrics_aggregator_actor = None
 
         self.number_of_steps = 0
         self.currently_completed = 0

@@ -198,11 +198,12 @@ Tasks T04–T06 can be one PR each or combined if tests stay focused.
 
 | Field | Content |
 |--------|---------|
-| **Goal** | When `driver.metrics_aggregator=true`, workers send sketch deltas + bucket deltas to aggregator; aggregator writes ES and/or merges into coordinator `InMemoryMetricsStore`. |
+| **Status** | **Done** |
+| **Goal** | When `driver.metrics.aggregator=true`, coordinator creates `MetricsAggregatorActor` (workers not wired yet); pure merge API + tests. |
 | **Start** | T11 merged (or T10 + partial T11 for ES-only aggregator output). |
-| **Work** | New actor file; message types; single-threaded merge. |
-| **End** | Flag false → no actor created. |
-| **Unit tests** | Actor logic tested without full Thespian where possible (extract merge function). |
+| **Work** | `MetricsAggregatorActor`, `BootstrapMetricsAggregator`, `RequestSketchMergeDelta` / throughput merge messages, `Driver`/`DriverActor` wiring; flag false → no actor. |
+| **End** | Flag false → no actor created; default benchmark behavior unchanged. |
+| **Unit tests** | `tests/driver/test_metrics_aggregator.py` — merge helpers; optional coordinator flag interaction. |
 | **Integration tests** | Multi-worker local actor system test (if Rally CI runs actor tests). |
 | **Acceptance** | Load test: driver mailbox depth reduced vs baseline (optional benchmark task). |
 

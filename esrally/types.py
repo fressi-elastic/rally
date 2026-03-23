@@ -106,6 +106,7 @@ Key = Literal[
     "load_driver_hosts",
     "local.dataset.cache",
     "master.nodes",
+    "metrics.aggregator",
     "metrics.log.dir",
     "metrics.request.downsample.factor",
     "metrics.url",
