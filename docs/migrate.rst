@@ -1,6 +1,43 @@
 Migration Guide
 ===============
 
+<<<<<<< Updated upstream
+=======
+Migrating to Rally 2.14.0
+-------------------------
+
+Minimum supported Elasticsearch for benchmarks is 8.0.0
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Rally 2.14.0 upgrades to the Elasticsearch Python client 9.x stack and urllib3 2.x. As documented in :doc:`versions`, Rally **2.14.0 and above** supports benchmarking Elasticsearch **8.0** through **9.x**. Using Rally 2.14.0+ against Elasticsearch **6.8** or **7.x** as the cluster under test is **no longer supported**.
+
+* If you must benchmark Elasticsearch 6.8 or 7.x, stay on Rally **2.13.x** until you can move the cluster to a supported version. See :doc:`versions` for the Rally ↔ Elasticsearch compatibility matrix.
+
+Custom tracks and the ``elasticsearch`` Python package
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Tracks and custom runners use Rally's Python environment. Rally pins ``elasticsearch`` and ``elastic-transport``; **do not list** those packages in track ``dependencies`` (they are not per-track version pins and can conflict with Rally). Update any private code that relied on older client APIs or behavior for compatibility with the **9.x** client, or remain on Rally 2.13.x until you can migrate.
+
+urllib3 2.x
+^^^^^^^^^^^
+
+Rally depends on urllib3 2.x. If you install Rally into an environment shared with other tools that still require urllib3 1.x, resolve the conflict.
+
+
+Migrating to Rally 2.13.0
+-------------------------
+
+Python 3.9 is unsupported; use Python 3.10 through 3.13
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Rally 2.13.0 drops support for Python 3.9. Supported interpreters are 3.10.x through 3.13.x. Check the :ref:`updated installation instructions <install_python>` for more details.
+
+Development uses uv instead of nox
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+
+>>>>>>> Stashed changes
 Migrating to Rally 2.12.0
 -------------------------
 
