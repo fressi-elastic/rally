@@ -46,7 +46,6 @@ class PerformRequestCase:
         body="{}",
         want_headers={
             "content-type": "application/vnd.elasticsearch+json; compatible-with=8",
-            "accept": "application/vnd.elasticsearch+json; compatible-with=8",
         },
     ),
     distribution_9_bulk_sets_ndjson_compat=PerformRequestCase(
@@ -57,7 +56,6 @@ class PerformRequestCase:
         body='{"index":{}}\n',
         want_headers={
             "content-type": "application/vnd.elasticsearch+x-ndjson; compatible-with=9",
-            "accept": "application/vnd.elasticsearch+x-ndjson; compatible-with=9",
         },
     ),
     serverless_uses_default_compat_mode=PerformRequestCase(
@@ -67,8 +65,7 @@ class PerformRequestCase:
         path="/",
         body="{}",
         want_headers={
-            "content-type": "application/vnd.elasticsearch+json; compatible-with=8",
-            "accept": "application/vnd.elasticsearch+json; compatible-with=8",
+            "content-type": "application/json",
         },
     ),
     explicit_compatibility_mode_overrides=PerformRequestCase(
@@ -77,6 +74,7 @@ class PerformRequestCase:
         method="GET",
         path="/",
         body="{}",
+        headers={"content-type": "application/json", "accept": "application/json"},
         compatibility_mode=8,
         want_headers={
             "content-type": "application/vnd.elasticsearch+json; compatible-with=8",
@@ -98,7 +96,6 @@ class PerformRequestCase:
         headers={"x-custom": "value"},
         want_headers={
             "content-type": "application/vnd.elasticsearch+json; compatible-with=8",
-            "accept": "application/vnd.elasticsearch+json; compatible-with=8",
             "x-custom": "value",
         },
     ),

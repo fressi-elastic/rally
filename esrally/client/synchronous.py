@@ -30,6 +30,8 @@ class RallySyncElasticsearch(Elasticsearch):
         super().__init__(hosts, **kwargs)
         self.distribution_version = distribution_version
         self.distribution_flavor = distribution_flavor
+        if self.is_serverless:
+            common.wrap_serverless_transport(self.transport)
 
     @property
     def is_serverless(self):
@@ -72,11 +74,13 @@ class RallySyncElasticsearch(Elasticsearch):
             headers; defaults to the minimal supported compatibility mode.
         :return: The API response from Elasticsearch.
         """
+        if not self.is_serverless:
+            compatibility_mode = compatibility_mode or self.distribution_version
         headers = common.ensure_mimetype_headers(
             headers=headers,
             path=path,
             body=body,
-            version=compatibility_mode or self.distribution_version,
+            version=compatibility_mode,
         )
         return super().perform_request(
             method=method, path=path, params=params, headers=headers, body=body, endpoint_id=endpoint_id, path_parts=path_parts

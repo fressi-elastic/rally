@@ -329,6 +329,8 @@ class RallyAsyncElasticsearch(AsyncElasticsearch, context.RequestContextHolder):
         # so we override method(s) here to provide BWC for any custom
         # runners that aren't using the new kwargs
         self.ilm = RallyIlmClient(self)
+        if self.is_serverless:
+            common.wrap_serverless_transport(self.transport)
 
     @property
     def is_serverless(self):
@@ -372,11 +374,13 @@ class RallyAsyncElasticsearch(AsyncElasticsearch, context.RequestContextHolder):
             headers; defaults to the minimal supported compatibility mode.
         :return: The API response from Elasticsearch.
         """
+        if not self.is_serverless:
+            compatibility_mode = compatibility_mode or self.distribution_version
         headers = common.ensure_mimetype_headers(
             headers=headers,
             path=path,
             body=body,
-            version=compatibility_mode or self.distribution_version,
+            version=compatibility_mode,
         )
         return await super().perform_request(
             method, path, params=params, headers=headers, body=body, endpoint_id=endpoint_id, path_parts=path_parts
