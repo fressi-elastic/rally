@@ -139,10 +139,9 @@ class PerformRequestCase:
         method="GET",
         path="/_cluster/health",
         body="{}",
-        # want_headers={
-        #     "content-type": "application/vnd.elasticsearch+json; compatible-with=8",
-        #     "accept": "application/vnd.elasticsearch+json; compatible-with=8",
-        # },
+        want_headers={
+            "content-type": "application/vnd.elasticsearch+json; compatible-with=8",
+        },
     ),
     distribution_9_bulk_sets_ndjson_compat=PerformRequestCase(
         distribution_version="9.1.0",
@@ -150,10 +149,9 @@ class PerformRequestCase:
         method="POST",
         path="/_bulk",
         body='{"index":{}}\n',
-        # want_headers={
-        #     "content-type": "application/vnd.elasticsearch+x-ndjson; compatible-with=9",
-        #     "accept": "application/vnd.elasticsearch+x-ndjson; compatible-with=9",
-        # },
+        want_headers={
+            "content-type": "application/vnd.elasticsearch+x-ndjson; compatible-with=9",
+        },
     ),
     serverless_uses_default_compat_mode=PerformRequestCase(
         distribution_version="8.0.0",
@@ -161,10 +159,9 @@ class PerformRequestCase:
         method="GET",
         path="/",
         body="{}",
-        # want_headers={
-        #     "content-type": "application/vnd.elasticsearch+json; compatible-with=8",
-        #     "accept": "application/vnd.elasticsearch+json; compatible-with=8",
-        # },
+        want_headers={
+            "content-type": "application/json",
+        },
     ),
     explicit_compatibility_mode_overrides=PerformRequestCase(
         distribution_version="9.0.0",
@@ -172,11 +169,12 @@ class PerformRequestCase:
         method="GET",
         path="/",
         body="{}",
+        headers={"content-type": "application/json", "accept": "application/json"},
         compatibility_mode=8,
-        # want_headers={
-        #     "content-type": "application/vnd.elasticsearch+json; compatible-with=8",
-        #     "accept": "application/vnd.elasticsearch+json; compatible-with=8",
-        # },
+        want_headers={
+            "content-type": "application/vnd.elasticsearch+json; compatible-with=8",
+            "accept": "application/vnd.elasticsearch+json; compatible-with=8",
+        },
     ),
     no_body_no_default_headers=PerformRequestCase(
         distribution_version=None,
@@ -192,8 +190,7 @@ class PerformRequestCase:
         body='{"a":1}',
         headers={"x-custom": "value"},
         want_headers={
-            # "content-type": "application/vnd.elasticsearch+json; compatible-with=8",
-            # "accept": "application/vnd.elasticsearch+json; compatible-with=8",
+            "content-type": "application/vnd.elasticsearch+json; compatible-with=8",
             "x-custom": "value",
         },
     ),
@@ -234,7 +231,6 @@ async def test_perform_request(
         case.path,
         body=case.body,
         headers=case.headers,
-        # compatibility_mode=case.compatibility_mode,
+        compatibility_mode=case.compatibility_mode,
     )
-
     assert got_headers == [case.want_headers]

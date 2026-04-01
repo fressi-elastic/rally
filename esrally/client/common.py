@@ -1,3 +1,21 @@
+# Licensed to Elasticsearch B.V. under one or more contributor
+# license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright
+# ownership. Elasticsearch B.V. licenses this file to you under
+# the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# 	http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+import functools
 import re
 import warnings
 from collections.abc import Mapping
@@ -37,7 +55,7 @@ def ensure_mimetype_headers(
         if path and path.endswith("/_bulk"):
             # Server version 9 is picky about this. This should improve compatibility.
             mimetype = "application/x-ndjson"
-        for header in ("content-type", "accept"):
+        for header in ("content-type",):  #  "accept"):
             headers.setdefault(header, mimetype)
 
     # Ensures compatibility mode is being applied to mime type.
@@ -46,22 +64,23 @@ def ensure_mimetype_headers(
     try:
         compatibility_mode = get_compatibility_mode(version=version)
     except ValueError as ex:
-        warnings.warn(f"Invalid compatibility mode {version!r}, defaulting to {_MIN_COMPATIBILITY_MODE!r}: {ex}")
-        compatibility_mode = _MIN_COMPATIBILITY_MODE
-    for header in ("accept", "content-type"):
-        mimetype = headers.get(header)
-        if mimetype is None:
-            continue
-        headers[header] = _COMPAT_MIMETYPE_RE.sub(
-            "application/vnd.elasticsearch+%s; compatible-with=%s" % (r"\g<1>", compatibility_mode), mimetype
-        )
+        warnings.warn(f"Invalid compatibility mode {version!r}, defaulting to None: {ex}")
+        compatibility_mode = None
+    if compatibility_mode is not None:
+        for header in ("accept", "content-type"):
+            mimetype = headers.get(header)
+            if mimetype is None:
+                continue
+            headers[header] = _COMPAT_MIMETYPE_RE.sub(
+                "application/vnd.elasticsearch+%s; compatible-with=%s" % (r"\g<1>", compatibility_mode), mimetype
+            )
     return headers
 
 
-def get_compatibility_mode(version: str | int | None = None) -> int:
+def get_compatibility_mode(version: str | int | None = None, default: int | None = None) -> int | None:
     if version is None:
-        # By default, return the minimum compatibility mode for better compatibility.
-        return _MIN_COMPATIBILITY_MODE
+        # It returns the default compatibility mode.
+        return default
 
     # Normalize version to an integer major version.
     if isinstance(version, str):
@@ -76,6 +95,31 @@ def get_compatibility_mode(version: str | int | None = None) -> int:
         supported = ", ".join(str(v) for v in _VALID_COMPATIBILITY_MODES)
         raise ValueError(f"Elasticsearch version {version!r} is not supported, supported versions are: {supported}.")
     return version
+
+
+def wrap_serverless_transport(transport: elastic_transport.Transport | elastic_transport.AsyncTransport) -> None:
+    """It ensures client transport never asks for compatibility mode to serverless server."""
+
+    _perform_request = transport.perform_request
+
+    @functools.wraps(_perform_request)
+    def wrapped_perform_request(
+        *args,
+        **kwargs,
+    ):
+        headers: Mapping[str, Any] | None = kwargs.get("headers")
+        if headers is not None:
+            for mimetype in ("content-type", "accept"):
+                value = headers.get(mimetype)
+                if not value or ";" not in value:
+                    continue
+                # remove any compatibility parameters from the header value, e.g.
+                # "application/vnd.elasticsearch+json; compatible-with=8" -> "application/json"
+                value = value.split(";")[0].strip().replace("/vnd.elasticsearch+", "/")
+                headers[mimetype] = value
+        return _perform_request(*args, **kwargs)
+
+    transport.perform_request = wrapped_perform_request
 
 
 def _escape(value: Any) -> str:

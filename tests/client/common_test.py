@@ -38,7 +38,7 @@ class CompatibilityModeCase:
     version_int_8=CompatibilityModeCase(version=8, want=8),
     version_int_9=CompatibilityModeCase(version=9, want=9),
     version_int_10=CompatibilityModeCase(version=10, want_error=ValueError),
-    no_version=CompatibilityModeCase(version=None, want=8),
+    no_version=CompatibilityModeCase(version=None, want=None),
     empty_version_raises=CompatibilityModeCase(version="", want_error=ValueError),
     invalid_version_raises=CompatibilityModeCase(version="invalid", want_error=ValueError),
 )
@@ -53,119 +53,130 @@ def test_get_compatibility_mode(case: CompatibilityModeCase) -> None:
 
 @dataclasses.dataclass
 class EnsureMimetypeHeadersCase:
-    headers: dict[str, str] | None
-    path: str | None
-    body: str | None
-    version: str | int | None
+    headers: dict[str, str] | None = None
+    path: str | None = None
+    body: str | None = None
+    version: str | int | None = None
     want_content_type: str | None = None
     want_accept: str | None = None
     want_warning_message: str | None = None
 
 
 @cases(
-    no_body_empty_headers=EnsureMimetypeHeadersCase(
-        headers=None,
-        path=None,
-        body=None,
-        version=None,
-    ),
+    all_empty=EnsureMimetypeHeadersCase(),
     body_sets_json=EnsureMimetypeHeadersCase(
-        headers=None,
-        path="/_cluster/health",
+        body="{}",
+        want_content_type="application/json",
+    ),
+    body_sets_json_v8=EnsureMimetypeHeadersCase(
         body="{}",
         version="8.0.0",
         want_content_type="application/vnd.elasticsearch+json; compatible-with=8",
-        want_accept="application/vnd.elasticsearch+json; compatible-with=8",
     ),
-    body_bulk_sets_ndjson=EnsureMimetypeHeadersCase(
-        headers=None,
+    body_sets_json_v9=EnsureMimetypeHeadersCase(
+        body="{}",
+        version="9.3.1",
+        want_content_type="application/vnd.elasticsearch+json; compatible-with=9",
+    ),
+    bulk_sets_ndjson=EnsureMimetypeHeadersCase(
+        path="/_bulk",
+        body='{"index":{}}\n',
+        want_content_type="application/x-ndjson",
+    ),
+    bulk_sets_ndjson_v8=EnsureMimetypeHeadersCase(
         path="/_bulk",
         body='{"index":{}}\n',
         version="8.0.0",
         want_content_type="application/vnd.elasticsearch+x-ndjson; compatible-with=8",
-        want_accept="application/vnd.elasticsearch+x-ndjson; compatible-with=8",
     ),
     body_bulk_path_suffix=EnsureMimetypeHeadersCase(
-        headers=None,
         path="/my_index/_bulk",
+        body="{}",
+        want_content_type="application/x-ndjson",
+    ),
+    body_bulk_path_suffix_v8=EnsureMimetypeHeadersCase(
+        path="/some/_bulk",
         body="{}",
         version="8.0.0",
         want_content_type="application/vnd.elasticsearch+x-ndjson; compatible-with=8",
-        want_accept="application/vnd.elasticsearch+x-ndjson; compatible-with=8",
     ),
-    compatibility_mode_rewrites=EnsureMimetypeHeadersCase(
-        headers=None,
-        path="/_cluster/health",
+    body_bulk_path_suffix_v9=EnsureMimetypeHeadersCase(
+        path="/some/_bulk",
         body="{}",
-        version="8.0.0",
+        version="9.3.1",
+        want_content_type="application/vnd.elasticsearch+x-ndjson; compatible-with=9",
+    ),
+    compatibility_mode_rewrites_v8=EnsureMimetypeHeadersCase(
+        headers={"content-type": "application/json", "accept": "application/json"},
+        path="/some/path",
+        body="{}",
+        version=8,
         want_content_type="application/vnd.elasticsearch+json; compatible-with=8",
         want_accept="application/vnd.elasticsearch+json; compatible-with=8",
+    ),
+    compatibility_mode_rewrites_v9=EnsureMimetypeHeadersCase(
+        headers={"content-type": "application/json", "accept": "application/json"},
+        path="/some/path",
+        body="{}",
+        version=9,
+        want_content_type="application/vnd.elasticsearch+json; compatible-with=9",
+        want_accept="application/vnd.elasticsearch+json; compatible-with=9",
     ),
     compatibility_mode_bulk=EnsureMimetypeHeadersCase(
-        headers=None,
-        path="/_bulk",
+        path="/some/_bulk",
         body="{}",
-        version="9.1.0",
+        version=9,
         want_content_type="application/vnd.elasticsearch+x-ndjson; compatible-with=9",
-        want_accept="application/vnd.elasticsearch+x-ndjson; compatible-with=9",
     ),
-    existing_headers_preserved=EnsureMimetypeHeadersCase(
+    json_headers_preserved=EnsureMimetypeHeadersCase(
         headers={"content-type": "application/json", "accept": "application/json"},
         path="/_cluster/health",
-        body="{}",
-        version="8.0.0",
+        version=8,
         want_content_type="application/vnd.elasticsearch+json; compatible-with=8",
         want_accept="application/vnd.elasticsearch+json; compatible-with=8",
+    ),
+    x_ndjson_headers_preserved=EnsureMimetypeHeadersCase(
+        headers={"content-type": "application/x-ndjson", "accept": "application/x-ndjson"},
+        path="/_cluster/health",
+        version=9,
+        want_content_type="application/vnd.elasticsearch+x-ndjson; compatible-with=9",
+        want_accept="application/vnd.elasticsearch+x-ndjson; compatible-with=9",
     ),
     case_insensitive_headers=EnsureMimetypeHeadersCase(
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         path="/_cluster/health",
         body="{}",
-        version="8.0.0",
+        version=8,
         want_content_type="application/vnd.elasticsearch+json; compatible-with=8",
         want_accept="application/vnd.elasticsearch+json; compatible-with=8",
     ),
     compatibility_mode_skips_missing_headers=EnsureMimetypeHeadersCase(
-        headers=None,
-        path="/_cluster/health",
-        body=None,
-        version=None,
+        path="/some/path",
     ),
     compatibility_mode_rewrites_only_present_accept=EnsureMimetypeHeadersCase(
         headers={"accept": "application/json"},
-        path="/_cluster/health",
-        body=None,
-        version="8.0.0",
+        path="/some/path",
+        version=8,
         want_accept="application/vnd.elasticsearch+json; compatible-with=8",
     ),
     compatibility_mode_rewrites_only_present_content_type=EnsureMimetypeHeadersCase(
         headers={"content-type": "application/json"},
-        path="/_cluster/health",
-        body=None,
         version="8.0.0",
         want_content_type="application/vnd.elasticsearch+json; compatible-with=8",
     ),
     unsupported_version_int=EnsureMimetypeHeadersCase(
         headers={"content-type": "application/json"},
-        path="/",
-        body="{}",
         version=7,
-        want_content_type="application/vnd.elasticsearch+json; compatible-with=8",
-        want_accept="application/vnd.elasticsearch+json; compatible-with=8",
+        want_content_type="application/json",
     ),
     unsupported_version_str=EnsureMimetypeHeadersCase(
         headers={"accept": "application/json"},
-        path="/",
-        body=None,
         version="7.0.0",
-        want_accept="application/vnd.elasticsearch+json; compatible-with=8",
+        want_accept="application/json",
     ),
     valid_version_no_warning=EnsureMimetypeHeadersCase(
         headers={"content-type": "application/json"},
-        path="/",
-        body="{}",
         version="8.0.0",
-        want_accept="application/vnd.elasticsearch+json; compatible-with=8",
         want_content_type="application/vnd.elasticsearch+json; compatible-with=8",
     ),
 )
