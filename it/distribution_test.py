@@ -36,13 +36,10 @@ def test_tar_distributions(cfg, dist, track):
     it.wait_until_port_is_free(port_number=port)
 
     enable_assertions = track != "http_logs"  # http_logs assertions fail in test mode
-    assert (
-        it.race(
-            cfg,
-            f'--distribution-version="{dist}" --track="{track}" --test-mode --car=4gheap,basic-license --target-hosts=127.0.0.1:{port}',
-            enable_assertions=enable_assertions,
-        )
-        == 0
+    it.race(
+        cfg,
+        f'--distribution-version="{dist}" --track="{track}" --test-mode --car=4gheap,basic-license --target-hosts=127.0.0.1:{port}',
+        enable_assertions=enable_assertions,
     )
 
 
@@ -115,10 +112,12 @@ def test_cluster():
     race_id = str(uuid.uuid4())
 
     it.wait_until_port_is_free(port_number=port)
-    cluster.install(distribution_version=dist, node_name="rally-node", car="4gheap,basic-license", http_port=port)
+    cluster.install(distribution_version=dist, node_name="rally-node", car="4gheap,basic-license")
     cluster.start(race_id=race_id)
-    yield cluster
-    cluster.stop()
+    try:
+        yield cluster
+    finally:
+        cluster.stop()
 
 
 @it.random_rally_config

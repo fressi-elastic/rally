@@ -24,6 +24,7 @@ import random
 import socket
 import subprocess
 import time
+from collections.abc import Mapping
 
 import pytest
 
@@ -31,7 +32,9 @@ from esrally import client, version
 from esrally.utils import process
 
 CONFIG_NAMES = ["in-memory-it", "es-it"]
-DISTRIBUTIONS = ["8.19.13", "9.2.7"]
+DISTRIBUTION_8 = "8.19.13"
+DISTRIBUTION_9 = "9.2.7"
+DISTRIBUTIONS = [DISTRIBUTION_8, DISTRIBUTION_9]
 TRACKS = ["geonames", "nyc_taxis", "http_logs", "nested"]
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -75,33 +78,51 @@ def rally_es(t):
     return wrapper
 
 
-def esrally_command_line_for(cfg: str, command_line: str) -> str:
-    return f"esrally {command_line} --configuration-name='{cfg}'"
+def esrally_command_line_for(*, cmd: str, cfg: str | None) -> str:
+    cmd = f"esrally {cmd}"
+    if cfg:
+        cmd += f" --configuration-name={cfg}"
+    return cmd
 
 
-def esrally(cfg: str, command_line: str, check: bool = False) -> int:
+def esrally(
+    cfg: str | None, cmd: str, check: bool = True, env: Mapping[str, str] | None = None, want_output: str | None = None
+) -> subprocess.CompletedProcess:
     """
     This method should be used for rally invocations of the all commands besides race.
     These commands may have different CLI options than race.
     """
-    command_line = esrally_command_line_for(cfg, command_line)
-    LOG.info("Running rally: %r", command_line)
+    cmd = esrally_command_line_for(cmd=cmd, cfg=cfg)
+    LOG.info("Running rally: %r", cmd)
     try:
-        return subprocess.run(command_line, shell=True, check=check, capture_output=True, text=True).returncode
+        result = subprocess.run(cmd, shell=True, check=check, capture_output=True, text=True, env=env)
     except subprocess.CalledProcessError as err:
         output = "    ".join([""] + err.stdout.splitlines(keepends=True))
-        pytest.fail("Failed running esrally:\n" f" - command line: {command_line}\n" f" - output: {output}\n")
+        pytest.fail("Failed running esrally:\n" f" - command line: {cmd}\n" f" - output: {output}\n")
+        raise
+
+    if want_output is not None:
+        assert want_output in result.stdout
+
+    return result
 
 
-def race(cfg: str, command_line: str, enable_assertions: bool = True, check: bool = False) -> int:
+def race(cfg: str, command_line: str, enable_assertions: bool = True, check: bool = True, port: int | None = None) -> subprocess.CompletedProcess:
     """
     This method should be used for rally invocations of the race command.
     It sets up some defaults for how the integration tests expect to run races.
     """
+    if port is not None:
+        wait_until_port_is_free(port_number=port)
+
     race_command = f"race {command_line} --kill-running-processes --on-error='abort'"
     if enable_assertions:
         race_command += " --enable-assertions"
-    return esrally(cfg, race_command, check=check)
+    try:
+        return esrally(cfg, race_command, check=check)
+    finally:
+        if port is not None:
+            wait_until_port_is_free(port_number=port)
 
 
 def shell_cmd(command_line):
@@ -141,42 +162,52 @@ def wait_until_port_is_free(port_number=39200, timeout=120):
 
 
 class TestCluster:
-    def __init__(self, cfg):
+
+    DEFAULT_DISTRIBUTION = DISTRIBUTION_9
+    DEFAULT_HTTP_PORT = 19200
+    DEFAULT_CAR = "defaults,basic-license"
+    DEFAULT_NODE_NAME = "it-cluster"
+
+    def __init__(
+        self,
+        cfg: str,
+        node_name: str | None = None,
+        http_port: int | None = None,
+        car: str | None = None,
+        distribution_version: str | None = None,
+    ):
         self.cfg = cfg
-        self.installation_id = None
-        self.http_port = None
+        self.installation_id: str | None = None
+        self.node_name = node_name or self.DEFAULT_NODE_NAME
+        self.http_port = http_port or self.DEFAULT_HTTP_PORT
+        self.car = car or self.DEFAULT_CAR
+        self.distribution_version = distribution_version or self.DEFAULT_DISTRIBUTION
 
-    def install(self, distribution_version, node_name, car, http_port):
-        self.http_port = http_port
-        transport_port = http_port + 100
-        try:
-            output = process.run_subprocess_with_output(
-                "esrally install --configuration-name={cfg} --quiet --distribution-version={dist} --build-type=tar "
-                "--http-port={http_port} --node={node_name} --master-nodes={node_name} --car={car} "
-                '--seed-hosts="127.0.0.1:{transport_port}" --cluster-name={cfg}'.format(
-                    cfg=self.cfg,
-                    dist=distribution_version,
-                    http_port=http_port,
-                    node_name=node_name,
-                    car=car,
-                    transport_port=transport_port,
-                )
-            )
-            self.installation_id = json.loads("".join(output))["installation-id"]
-        except BaseException as e:
-            raise AssertionError(f"Failed to install Elasticsearch {distribution_version}.", e)
+    def install(
+        self, *, node_name: str | None = None, http_port: int | None = None, car: str | None = None, distribution_version: str | None = None
+    ):
+        self.http_port = http_port or self.http_port
+        self.car = car or self.car
+        self.distribution_version = distribution_version or self.distribution_version
+        self.node_name = node_name or self.node_name
+        transport_port = self.http_port + 100
+        result = esrally(
+            self.cfg,
+            f"install --configuration-name={self.cfg} --quiet --distribution-version={self.distribution_version} "
+            f"--build-type=tar --http-port={self.http_port} --node={node_name} --master-nodes={node_name} --car={self.car} "
+            f'--seed-hosts="127.0.0.1:{transport_port}"',
+        )
+        self.installation_id = json.loads(result.stdout)["installation-id"]
 
-    def start(self, race_id):
-        cmd = f'start --runtime-jdk="bundled" --installation-id={self.installation_id} --race-id={race_id}'
-        esrally(self.cfg, cmd, check=True)
+    def start(self, race_id: str):
+        esrally(self.cfg, f'start --runtime-jdk="bundled" --installation-id={self.installation_id} --race-id={race_id}')
         es = client.EsClientFactory(hosts=[{"host": "127.0.0.1", "port": self.http_port}], client_options={}).create()
         client.wait_for_rest_layer(es)
         assert es.info()["cluster_name"] == self.cfg
 
     def stop(self):
         if self.installation_id:
-            if esrally(self.cfg, f"stop --installation-id={self.installation_id}") != 0:
-                raise AssertionError("Failed to stop Elasticsearch test cluster.")
+            esrally(self.cfg, f"stop --installation-id={self.installation_id}")
 
     def __str__(self):
         return f"TestCluster[installation-id={self.installation_id}]"

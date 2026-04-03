@@ -15,15 +15,21 @@
 # specific language governing permissions and limitations
 # under the License.
 
+import pytest
+
 import it
 
 
+@pytest.fixture(autouse=True, params=it.DISTRIBUTIONS)
+def distribution_version(request) -> str:
+    return request.param
+
+
 @it.random_rally_config
-def test_download_distribution(cfg):
-    for d in it.DISTRIBUTIONS:
-        assert it.esrally(cfg, f'download --distribution-version="{d}" --quiet') == 0
+def test_download_distribution(cfg, distribution_version: str):
+    it.esrally(cfg, f'download --distribution-version="{distribution_version}" --quiet')
 
 
 @it.random_rally_config
 def test_does_not_download_unsupported_distribution(cfg):
-    assert it.esrally(cfg, 'download --distribution-version="1.7.6" --quiet') != 0
+    assert it.esrally(cfg, 'download --distribution-version="1.7.6" --quiet', check=False).returncode != 0

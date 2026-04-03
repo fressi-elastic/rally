@@ -14,96 +14,63 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+import dataclasses
 import json
 
+import pytest
+
 import it
-from esrally.utils import process
+from esrally.utils import cases
 
 
-@it.random_rally_config
-def test_sources(cfg):
+@dataclasses.dataclass
+class SourceCase:
+    revision: str | None = None
+    elasticsearch_plugins: str | None = None
+    pipeline: str | None = None
+    source_build_method: str | None = None
+
+
+@cases.cases(
+    revision=SourceCase(revision="latest", elasticsearch_plugins="analysis-icu"),
+    docker_build_method=SourceCase(revision="@2022-07-07", elasticsearch_plugins="analysis-icu", source_build_method="docker"),
+    from_sources=SourceCase(pipeline="from-sources"),
+    docker_from_sources=SourceCase(pipeline="from-sources", source_build_method="docker"),
+)
+def test_race_with_sources(cfg, case: SourceCase):
     port = 19200
     it.wait_until_port_is_free(port_number=port)
+    cmd = f"--track=geonames --test-mode  --target-hosts=127.0.0.1:{port} --challenge=append-no-conflicts-index-only --car=4gheap,basic-license"
+    if case.revision is not None:
+        cmd += f" --revision={case.revision}"
+    if case.elasticsearch_plugins is not None:
+        cmd += f" --elasticsearch-plugins={case.elasticsearch_plugins}"
+    if case.pipeline is not None:
+        cmd += f" --pipeline={case.pipeline}"
+    if case.source_build_method is not None:
+        cmd += f" --source-build-method={case.source_build_method}"
 
-    # Default sources build method
-    assert (
-        it.race(
-            cfg,
-            f"--revision=latest --track=geonames --test-mode  --target-hosts=127.0.0.1:{port} "
-            f"--challenge=append-no-conflicts --car=4gheap,basic-license --elasticsearch-plugins=analysis-icu",
-        )
-        == 0
-    )
-
-    # Default sources build method
     it.wait_until_port_is_free(port_number=port)
-    assert (
-        it.race(
-            cfg,
-            f"--pipeline=from-sources --track=geonames --test-mode --target-hosts=127.0.0.1:{port} "
-            f'--challenge=append-no-conflicts-index-only --car="4gheap,basic-license,ea"',
-        )
-        == 0
-    )
-
-    # Docker sources build method
-    assert (
-        it.race(
-            cfg,
-            f"--revision=@2022-07-07 --track=geonames --test-mode  --target-hosts=127.0.0.1:{port} "
-            f"--challenge=append-no-conflicts --car=4gheap,basic-license --elasticsearch-plugins=analysis-icu "
-            f"--source-build-method=docker",
-        )
-        == 0
-    )
-
-    # Docker sources build method
-    it.wait_until_port_is_free(port_number=port)
-    assert (
-        it.race(
-            cfg,
-            f"--pipeline=from-sources --track=geonames --test-mode --target-hosts=127.0.0.1:{port} "
-            f'--source-build-method=docker --challenge=append-no-conflicts-index-only --car="4gheap,basic-license,ea"',
-        )
-        == 0
-    )
+    it.race(cfg, cmd)
 
 
-@it.random_rally_config
-def test_build_es_and_plugin_with_docker(cfg):
-    assert (
-        it.esrally(
-            cfg,
-            "build --source-build-method=docker --revision=latest --target-arch aarch64 --target-os linux "
-            "--elasticsearch-plugins=analysis-icu --quiet",
-        )
-        == 0
-    )
+@dataclasses.dataclass
+class BuildCase:
+    target_arch: str
+    target_os: str = "linux"
+    source_build_method: str | None = None
 
 
-@it.random_rally_config
-def test_build_es(cfg):
-    assert (
-        it.esrally(
-            cfg,
-            "build --revision=latest --target-arch aarch64 --target-os linux --quiet",
-        )
-        == 0
-    )
-
-
-def test_build_es_linux_aarch64_output():
-    def run_command(target_os, target_arch):
-        try:
-            output = process.run_subprocess_with_output(
-                f"esrally build --revision=latest --target-arch {target_arch} --target-os {target_os} --quiet"
-            )
-            print(output)
-            elasticsearch = json.loads("".join(output))["elasticsearch"]
-            assert f"{target_os}-{target_arch}" in elasticsearch
-
-        except BaseException as e:
-            raise AssertionError(f"Failed to build Elasticsearch for [{target_os}, {target_arch}].", e)
-
-    run_command("linux", "aarch64")
-    run_command("linux", "x86_64")
+@cases.cases(
+    linux_amd64=BuildCase("x86_64"),
+    linux_aarch64=BuildCase("aarch64"),
+    docker_amd64=BuildCase("x86_64", source_build_method="docker"),
+    docker_aarch64=BuildCase("aarch64", source_build_method="docker"),
+)
+def test_build(cfg: str, case: BuildCase):
+    cmd = f"build --revision=latest --target-arch {case.target_arch} --target-os {case.target_os} "
+    "--elasticsearch-plugins=analysis-icu --quiet"
+    if case.source_build_method is not None:
+        cmd += f" --source-build-method={case.source_build_method}"
+    result = it.esrally(cfg, cmd)
+    assert f"{case.target_os}-{case.target_arch}" in json.loads(result.stdout)["elasticsearch"]

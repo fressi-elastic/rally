@@ -73,18 +73,19 @@ def remove_integration_test_config():
 
 
 class EsMetricsStore:
-    VERSION = "8.5.1"
 
-    def __init__(self):
+    HTTP_PORT = 10200
+
+    def __init__(self, http_port: int = HTTP_PORT):
         self.cluster = TestCluster("in-memory-it")
+        self.http_port = http_port
 
     def start(self):
         print("Starting Elasticsearch metrics store...")
         self.cluster.install(
-            distribution_version=EsMetricsStore.VERSION,
             node_name="metrics-store",
             car="defaults,basic-license",
-            http_port=10200,
+            http_port=self.http_port,
         )
         self.cluster.start(race_id="metrics-store")
 
