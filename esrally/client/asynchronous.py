@@ -374,8 +374,11 @@ class RallyAsyncElasticsearch(AsyncElasticsearch, context.RequestContextHolder):
             headers; defaults to the minimal supported compatibility mode.
         :return: The API response from Elasticsearch.
         """
-        if not self.is_serverless:
+        if self.is_serverless:
+            compatibility_mode = None
+        else:
             compatibility_mode = compatibility_mode or self.distribution_version
+
         headers = common.ensure_mimetype_headers(
             headers=headers,
             path=path,

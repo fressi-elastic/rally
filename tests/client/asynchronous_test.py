@@ -151,6 +151,7 @@ class PerformRequestCase:
         body='{"index":{}}\n',
         want_headers={
             "content-type": "application/vnd.elasticsearch+x-ndjson; compatible-with=9",
+            "accept": "application/vnd.elasticsearch+x-ndjson; compatible-with=9",
         },
     ),
     serverless_uses_default_compat_mode=PerformRequestCase(
@@ -233,4 +234,5 @@ async def test_perform_request(
         headers=case.headers,
         compatibility_mode=case.compatibility_mode,
     )
+
     assert got_headers == [case.want_headers]

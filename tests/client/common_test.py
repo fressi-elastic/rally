@@ -39,6 +39,7 @@ class CompatibilityModeCase:
     version_int_9=CompatibilityModeCase(version=9, want=9),
     version_int_10=CompatibilityModeCase(version=10, want_error=ValueError),
     no_version=CompatibilityModeCase(version=None, want=None),
+    serverless_version=CompatibilityModeCase(version="serverless", want=None),
     empty_version_raises=CompatibilityModeCase(version="", want_error=ValueError),
     invalid_version_raises=CompatibilityModeCase(version="invalid", want_error=ValueError),
 )
@@ -177,6 +178,15 @@ class EnsureMimetypeHeadersCase:
     valid_version_no_warning=EnsureMimetypeHeadersCase(
         headers={"content-type": "application/json"},
         version="8.0.0",
+        want_accept="application/vnd.elasticsearch+json; compatible-with=8",
+        want_content_type="application/vnd.elasticsearch+json; compatible-with=8",
+    ),
+    serverless_distribution_no_warning=EnsureMimetypeHeadersCase(
+        headers={"content-type": "application/json"},
+        path="/",
+        body="{}",
+        version="serverless",
+        want_accept="application/vnd.elasticsearch+json; compatible-with=8",
         want_content_type="application/vnd.elasticsearch+json; compatible-with=8",
     ),
 )

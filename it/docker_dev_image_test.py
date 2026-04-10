@@ -14,9 +14,12 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-
+import dataclasses
+import logging
 import os
+import re
 import subprocess
+from collections.abc import Callable, Generator, Mapping
 
 import pytest
 
@@ -24,27 +27,42 @@ import it
 from esrally import version
 from esrally.utils import cases
 
+LOG = logging.getLogger(__name__)
 
-@cases.cases(
-    arg_name="command",
-    help="--help",
-    race_geonames=(
-        "race --pipeline=benchmark-only --test-mode --track=geonames --challenge=append-no-conflicts-index-only " "--target-hosts=es01:9200"
-    ),
-    list_tracks="list tracks",
+# Compose file used by both this test module and release-docker-test.sh.
+COMPOSE_FILE = os.path.join(it.ROOT_DIR, "docker", "docker-compose-tests.yml")
+
+# Start of Rally's tabular output; everything before this (e.g. ASCII banner) is ignored when parsing.
+_AVAILABLE_TRACKS_MARKER = "Available tracks:"
+
+# Shared race invocation against the ES service defined in docker-compose-tests.yml (es01:9200).
+_RACE_FLAGS = (
+    "race --pipeline=benchmark-only --test-mode --track=geonames --challenge=append-no-conflicts-index-only --target-hosts=es01:9200"
 )
-def test_docker_compose(command: str):
+
+
+def _docker_compose_process_env(compose_env: Mapping[str, str]) -> dict[str, str]:
+    """Merge parent env with compose_env and set defaults for every var interpolated in docker-compose-tests.yml.
+
+    Avoids Docker Compose warnings (e.g. \"variable is not set\") on ``down`` / ``logs`` when ``TEST_COMMAND`` was
+    only defined for a prior ``run``.
+    """
     env = os.environ.copy()
-    env["TEST_COMMAND"] = command
-    env["RALLY_DOCKER_IMAGE"] = "elastic/rally"
-    env["RALLY_VERSION"] = version.__version__
-    env["RALLY_VERSION_TAG"] = version.__version__
+    env.update(compose_env)
+    env.setdefault("TEST_COMMAND", "--help")
+    env.setdefault("RALLY_DOCKER_FILE", "docker/Dockerfiles/dev/Dockerfile")
+    return env
+
+
+def tear_down_stack(compose_env: Mapping[str, str]) -> None:
+    """Stop and remove the compose project so the next run starts from a clean stack."""
+    LOG.info("Tearing down docker stack... (compose_env=%s)", compose_env)
+    env = _docker_compose_process_env(compose_env)
 
     try:
-        return subprocess.run(
-            f"docker compose -f {it.ROOT_DIR}/docker/docker-compose-tests.yml up --abort-on-container-exit",
+        subprocess.run(
+            f"docker compose -f '{COMPOSE_FILE}' down -v",
             env=env,
-            capture_output=False,  # We'll define streams manually
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -52,6 +70,150 @@ def test_docker_compose(command: str):
             shell=True,
         )
     except subprocess.CalledProcessError as err:
-        pytest.fail(f"Docker compose test failed:\n{err.stdout}")
+        msg = (
+            "Docker compose down failed:\n"
+            f"  - command: '{err.cmd}'\n"
+            f"  - args: {err.args}\n"
+            f"  - return code: {err.returncode}\n"
+            f"  - output:\n{err.stdout}\n"
+        )
+        LOG.error(msg)
+        pytest.fail(msg)
+    else:
+        LOG.debug("Compose stack is down (compose_env=%s).", compose_env)
+
+
+@pytest.fixture(scope="module")
+def compose_env() -> Generator[Mapping[str, str]]:
+    """Env vars passed to ``docker compose`` so the rally image tag matches the workspace Rally version."""
+    env = {
+        "RALLY_VERSION": version.__version__,
+        "RALLY_VERSION_TAG": version.__version__,
+        "RALLY_DOCKER_IMAGE": os.environ.get("RALLY_DOCKER_IMAGE", "elastic/rally"),
+        # Isolate project name per test module to avoid clashing with other compose runs on the same host.
+        "COMPOSE_PROJECT_NAME": __name__.replace(".", "_"),
+    }
+    tear_down_stack(env)
+    try:
+        yield env
     finally:
-        subprocess.run(f"docker compose -f {it.ROOT_DIR}/docker/docker-compose-tests.yml down -v", shell=True, check=False)
+        if LOG.isEnabledFor(logging.DEBUG):
+            logs = subprocess.run(
+                f"docker compose -f '{COMPOSE_FILE}' logs -t",
+                capture_output=True,
+                shell=True,
+                check=False,
+                env=_docker_compose_process_env(env),
+            )
+            LOG.debug("Containers logs:\n%s", logs.stdout.decode("utf-8"))
+        tear_down_stack(env)
+
+
+def assert_list_tracks_contains(expected_track_names: list[str]) -> Callable[[str], None]:
+    """Return a ``want_stdout`` callable that parses ``list tracks`` stdout and requires every expected track name."""
+    expected = frozenset(expected_track_names)
+
+    def check_stdout(stdout: str) -> None:
+        actual = set(track_names_from_list_tracks_stdout(stdout))
+        missing = expected - actual
+        if missing:
+            sample = sorted(actual)[:15]
+            pytest.fail(
+                "list tracks output missing expected track name(s) "
+                f"{sorted(missing)!r}; parsed had {len(actual)} name(s); sample: {sample!r}"
+            )
+
+    return check_stdout
+
+
+def track_names_from_list_tracks_stdout(stdout: str) -> list[str]:
+    """Parse ``list tracks`` tabular stdout and return track names sorted for stable comparison."""
+    text = stdout.replace("\r\n", "\n")
+    idx = text.find(_AVAILABLE_TRACKS_MARKER)
+    if idx == -1:
+        pytest.fail("stdout did not contain the list-tracks marker " f"{_AVAILABLE_TRACKS_MARKER!r}; head:\n{text[:800]!r}")
+    body = text[idx:]
+    success_idx = body.find("\n[INFO] SUCCESS")
+    if success_idx != -1:
+        body = body[:success_idx]
+    lines = body.splitlines()
+    header_i = 0
+    while header_i < len(lines):
+        s = lines[header_i].strip()
+        if s.startswith("Name") and "Description" in s:
+            break
+        header_i += 1
+    else:
+        pytest.fail("list tracks stdout did not contain the expected table header after " f"{_AVAILABLE_TRACKS_MARKER!r}")
+    sep_i = header_i + 1
+    if sep_i >= len(lines) or "-" not in lines[sep_i]:
+        pytest.fail("list tracks stdout did not contain a table separator after the header")
+    names: list[str] = []
+    for line in lines[sep_i + 1 :]:
+        stripped = line.rstrip()
+        if not stripped.strip():
+            continue
+        if stripped.strip().replace("-", "") == "":
+            break
+        parts = re.split(r"\s{2,}", stripped.lstrip(), maxsplit=1)
+        if parts[0].strip():
+            names.append(parts[0].strip())
+    return sorted(names)
+
+
+@dataclasses.dataclass
+class ComposeCase:
+    # Passed as TEST_COMMAND to the rally service (see docker-compose-tests.yml).
+    command: str
+    want_return_code: int = 0
+    # Exact string match, or a callable that validates ``result.stdout``.
+    want_stdout: str | Callable[[str], None] | None = None
+    want_stderr: str | None = None
+
+
+@cases.cases(
+    help=ComposeCase("--help"),
+    list_tracks=ComposeCase(
+        "list tracks",
+        want_stdout=assert_list_tracks_contains(["elastic/logs", "geonames", "http_logs", "nyc_taxis", "so_vector"]),
+    ),
+    race=ComposeCase(_RACE_FLAGS),
+    race_explicit_esrally=ComposeCase(f"esrally {_RACE_FLAGS}"),
+)
+def test_docker_compose(
+    case: ComposeCase,
+    compose_env: Mapping[str, str],
+) -> None:
+    """Run one rally subcommand inside the compose-defined rally container (with ES dependency)."""
+    LOG.info("Running rally with 'docker compose', command='%s', env=%r", case.command, compose_env)
+    env = _docker_compose_process_env(compose_env)
+    env["TEST_COMMAND"] = case.command
+    try:
+        # ``run`` starts dependencies (es01), runs the rally service once, then tears down that one-off container.
+        result = subprocess.run(
+            f"docker compose -f '{COMPOSE_FILE}' run --remove-orphans rally",
+            env=env,
+            capture_output=True,
+            text=True,
+            check=case.want_return_code == 0,
+            shell=True,
+        )
+    except subprocess.CalledProcessError as err:
+        pytest.fail(
+            "Docker compose run failed:\n"
+            f"  - command: {err.cmd}\n"
+            f"  - args: {err.args}\n"
+            f"  - return code: {err.returncode}\n"
+            f"  - stdout:\n{err.stdout}\n"
+            f"  - stderr:\n{err.stderr}\n"
+        )
+
+    LOG.debug("Docker compose up succeeded. STDOUT:\n%s", result.stdout)
+    assert result.returncode == case.want_return_code
+    if case.want_stdout is not None:
+        if callable(case.want_stdout):
+            case.want_stdout(result.stdout)
+        else:
+            assert result.stdout == case.want_stdout
+    if case.want_stderr is not None:
+        assert result.stderr == case.want_stderr
